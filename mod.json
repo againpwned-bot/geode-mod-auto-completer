@@ -1,0 +1,124 @@
+{
+	"geode": "5.10.1",
+	"gd": {
+		"win": "2.2081"
+	},
+	"id": "againpwned.auto-completer",
+	"name": "Auto Completer",
+	"version": "v1.0.0",
+	"developer": "againpwned",
+	"description": "Pathfinding bot that beats levels for you, with play styles, a path viewer and a Mega Hack style menu.",
+	"tags": ["gameplay", "utility"],
+	"resources": {
+		"files": [
+			"resources/Roboto-Medium.ttf"
+		]
+	},
+	"settings": {
+		"general-title": {
+			"type": "title",
+			"name": "General"
+		},
+		"enabled": {
+			"type": "bool",
+			"name": "Enable Auto Completer",
+			"description": "Plan a safe route through every level you open and play it automatically. Safe mode is always on while the bot is active: no progress, stars or leaderboard submissions are saved.",
+			"default": true
+		},
+		"play-style": {
+			"type": "string",
+			"name": "Play Style",
+			"description": "<cy>Default</c>: balanced, clicks in the middle of each safe timing window.\n<cg>Perfect</c>: frame precise scan with the widest margins, slower to plan.\n<cb>Human</c>: natural timing spread and tap lengths.\n<co>Minimal</c>: latest safe click, shortest taps.",
+			"default": "Default",
+			"one-of": ["Default", "Perfect", "Human", "Minimal"]
+		},
+		"ignore-inputs": {
+			"type": "bool",
+			"name": "Ignore Inputs",
+			"description": "Block your own clicks while the bot is playing.",
+			"default": true
+		},
+		"auto-correct": {
+			"type": "bool",
+			"name": "Auto Correct",
+			"description": "If the real run drifts away from the planned path, plan again from that point.",
+			"default": true
+		},
+		"compute-budget": {
+			"type": "int",
+			"name": "Compute Budget (ms per frame)",
+			"description": "How long the planner may run each frame while computing a path. Higher values plan faster.",
+			"default": 30,
+			"min": 5,
+			"max": 200,
+			"control": {
+				"slider": true,
+				"slider-step": 5,
+				"input": true
+			}
+		},
+		"path-title": {
+			"type": "title",
+			"name": "Path Viewer"
+		},
+		"path-viewer": {
+			"type": "bool",
+			"name": "Show Path",
+			"description": "Draw the planned route inside the level.",
+			"default": true
+		},
+		"path-full": {
+			"type": "bool",
+			"name": "Show Whole Path",
+			"description": "Draw the full route instead of only the part ahead of the player.",
+			"default": false
+		},
+		"path-clicks": {
+			"type": "bool",
+			"name": "Click Markers",
+			"description": "Yellow dots where clicks start, red dots where they end.",
+			"default": true
+		},
+		"path-lookahead": {
+			"type": "float",
+			"name": "Lookahead (seconds)",
+			"description": "How far ahead of the player the route is drawn.",
+			"default": 3.0,
+			"min": 0.5,
+			"max": 15.0,
+			"control": {
+				"slider": true,
+				"slider-step": 0.5,
+				"input": true
+			}
+		},
+		"path-thickness": {
+			"type": "float",
+			"name": "Line Thickness",
+			"default": 1.5,
+			"min": 0.5,
+			"max": 5.0,
+			"control": {
+				"slider": true,
+				"slider-step": 0.1,
+				"input": true
+			}
+		},
+		"interface-title": {
+			"type": "title",
+			"name": "Interface"
+		},
+		"menu-key": {
+			"type": "keybind",
+			"name": "Menu Key",
+			"description": "Opens and closes the Auto Completer menu.",
+			"default": "Tab"
+		},
+		"show-hud": {
+			"type": "bool",
+			"name": "Status HUD",
+			"description": "Show a small status line in the corner while in a level.",
+			"default": true
+		}
+	}
+}

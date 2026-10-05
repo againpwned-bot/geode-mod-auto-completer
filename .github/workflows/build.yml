@@ -1,0 +1,38 @@
+name: Build Geode Mod
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+jobs:
+  planner-tests:
+    name: Planner tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run planner tests
+        run: |
+          g++ -std=c++20 -O2 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            -I src tests/planner_test.cpp src/planner/Planner.cpp -o planner_test
+          ./planner_test
+
+  build:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the mod
+        id: build
+        uses: geode-sdk/build-geode-mod@main
+        with:
+          target: Win64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Auto Completer (Windows)
+          path: ${{ steps.build.outputs.build-output }}
