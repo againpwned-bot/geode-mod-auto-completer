@@ -11,7 +11,8 @@ public:
     static PathViewer& get();
 
     void attach(PlayLayer* layer);
-    void detach();
+    // Removes the viewer if it belongs to `layer`.
+    void detach(PlayLayer* layer);
     void update(PlayLayer* layer);
 
 private:
@@ -20,6 +21,7 @@ private:
     void redraw(int from, int to, int stride);
 
     cocos2d::CCDrawNode* m_node = nullptr; // retained while attached
+    PlayLayer* m_layer = nullptr;
     unsigned m_drawnRevision = ~0u;
     unsigned m_drawnTick = ~0u;
     bool m_drawnFull = false;

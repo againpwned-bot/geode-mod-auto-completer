@@ -155,7 +155,11 @@ void PlayerFix::apply(PlayerObject* player) const {
 }
 
 GameSim::GameSim(PlayLayer* layer, bool appliedHold)
-    : m_layer(layer), m_base(layer->m_gameState.m_currentProgress), m_hold(appliedHold) {}
+    : m_layer(layer),
+      m_base(layer->m_gameState.m_currentProgress),
+      m_hold(appliedHold),
+      m_endAnimationStarted(layer->m_levelEndAnimationStarted),
+      m_endChecked(layer->m_endChecked) {}
 
 GameSim::~GameSim() {
     for (auto& slot : m_slots) {
@@ -170,7 +174,10 @@ int GameSim::tick() const {
 }
 
 int GameSim::save() {
+    bool const practice = m_layer->m_isPracticeMode;
+    if (m_practiceWrap) m_layer->m_isPracticeMode = true;
     CheckpointObject* checkpoint = m_layer->createCheckpoint();
+    m_layer->m_isPracticeMode = practice;
     if (!checkpoint) return -1;
     checkpoint->retain();
 
@@ -201,10 +208,15 @@ void GameSim::load(int handle) {
     auto const& slot = m_slots[handle];
     if (!slot.used || !slot.checkpoint) return;
 
+    bool const practice = m_layer->m_isPracticeMode;
+    if (m_practiceWrap) m_layer->m_isPracticeMode = true;
     m_layer->loadFromCheckpoint(slot.checkpoint);
+    m_layer->m_isPracticeMode = practice;
     slot.player1.apply(m_layer->m_player1);
     slot.player2.apply(m_layer->m_player2);
     m_layer->m_gameState.m_currentProgress = slot.progress;
+    m_layer->m_levelEndAnimationStarted = m_endAnimationStarted;
+    m_layer->m_endChecked = m_endChecked;
     m_hold = slot.hold;
 }
 
@@ -237,6 +249,7 @@ RunResult GameSim::run(int untilTick, InputFn const& input, SampleFn const& samp
         int const before = this->tick();
         if (before >= untilTick) break;
 
+        ctx.currentTick = before;
         m_layer->m_extraDelta = 0.0;
         m_layer->update(kTickDt);
 

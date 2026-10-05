@@ -14,6 +14,7 @@ namespace {
     constexpr int kMaxFailures = 2;
     constexpr float kDivergenceTolerance = 2.f;
     constexpr int kSelfTestTicks = 240;
+    constexpr float kExactRestore = 0.01f;
 
     float progressOf(PlayLayer* layer, float x) {
         if (!layer || layer->m_levelLength <= 0.f) return 0.f;
@@ -156,6 +157,7 @@ void Bot::onLevelInit(PlayLayer* layer) {
     m_layer = layer;
     this->invalidatePlan();
     m_stats = BotStats{};
+    m_practiceWrap = false;
     m_failures = 0;
     m_replans = 0;
     m_seedSalt = 0;
@@ -316,14 +318,30 @@ void Bot::startCompute(PlayLayer* layer, bool replan) {
     m_sim = std::make_unique<GameSim>(layer, hold);
 
     if (!replan && m_stats.selfTestDeviation < 0.f) {
-        m_stats.selfTestDeviation = m_sim->selfTest(kSelfTestTicks);
-        if (m_stats.selfTestDeviation > 0.01f) {
-            log::warn("Checkpoint self test: restores are off by up to {:.3f} units", m_stats.selfTestDeviation);
+        // Check once per level that checkpoints restore the game exactly. If they don't,
+        // see whether practice style checkpoints do better and keep whichever is closer.
+        float deviation = m_sim->selfTest(kSelfTestTicks);
+        if (deviation > kExactRestore || deviation < 0.f) {
+            m_sim->setPracticeWrap(true);
+            float const wrapped = m_sim->selfTest(kSelfTestTicks);
+            log::info("Checkpoint self test: normal {:.4f}, practice style {:.4f}", deviation, wrapped);
+            if (wrapped >= 0.f && (deviation < 0.f || wrapped < deviation)) {
+                deviation = wrapped;
+                m_practiceWrap = true;
+            }
+            else {
+                m_sim->setPracticeWrap(false);
+            }
+        }
+        m_stats.selfTestDeviation = deviation;
+        if (deviation > kExactRestore) {
+            log::warn("Checkpoint restores are off by up to {:.3f} units; relying on auto correct", deviation);
         }
         else {
-            log::info("Checkpoint self test passed (deviation {:.4f})", m_stats.selfTestDeviation);
+            log::info("Checkpoint self test passed (deviation {:.4f})", deviation);
         }
     }
+    m_sim->setPracticeWrap(m_practiceWrap);
 
     if (!replan || !m_planValid) {
         m_planStyle = settings::playStyle();

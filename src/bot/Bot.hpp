@@ -100,6 +100,7 @@ private:
     double m_computeSeconds = 0.0;
     float m_computeProgress = 0.f;
     bool m_audioPaused = false;
+    bool m_practiceWrap = false;
 
     // plan (indexed by absolute tick, m_gameState.m_currentProgress)
     bool m_planValid = false;

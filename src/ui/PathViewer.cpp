@@ -42,7 +42,7 @@ PathViewer& PathViewer::get() {
 }
 
 void PathViewer::attach(PlayLayer* layer) {
-    this->detach();
+    this->detach(m_layer);
     if (!layer) return;
 
     auto* node = PathDrawNode::create();
@@ -60,20 +60,22 @@ void PathViewer::attach(PlayLayer* layer) {
     parent->addChild(node, z);
     node->retain();
     m_node = node;
+    m_layer = layer;
     m_drawnRevision = ~0u;
     m_drawnTick = ~0u;
     m_drawnFull = false;
 }
 
-void PathViewer::detach() {
-    if (!m_node) return;
+void PathViewer::detach(PlayLayer* layer) {
+    if (!m_node || layer != m_layer) return;
     m_node->removeFromParent();
     m_node->release();
     m_node = nullptr;
+    m_layer = nullptr;
 }
 
 void PathViewer::update(PlayLayer* layer) {
-    if (!m_node || !layer) return;
+    if (!m_node || !layer || layer != m_layer) return;
 
     auto const& bot = Bot::get();
     bool const show = settings::enabled() && settings::pathViewer() && bot.hasPlan() &&

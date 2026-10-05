@@ -114,6 +114,11 @@ public:
     // difference between the two runs (0 means restores are exact).
     float selfTest(int ticks);
 
+    // Pretend to be in practice mode while creating and loading checkpoints, in case the
+    // game only saves some state for practice checkpoints.
+    void setPracticeWrap(bool wrap) { m_practiceWrap = wrap; }
+    bool practiceWrap() const { return m_practiceWrap; }
+
 private:
     struct Slot {
         CheckpointObject* checkpoint = nullptr;
@@ -127,6 +132,10 @@ private:
     PlayLayer* m_layer = nullptr;
     unsigned m_base = 0;
     bool m_hold = false;
+    bool m_practiceWrap = false;
+    // Level end flags from before planning; a simulated finish must not leak into the real run.
+    bool m_endAnimationStarted = false;
+    bool m_endChecked = false;
     int m_live = 0;
     std::vector<Slot> m_slots;
     std::vector<int> m_free;

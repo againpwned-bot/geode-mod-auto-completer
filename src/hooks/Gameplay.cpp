@@ -38,8 +38,15 @@ class $modify(ACPlayLayer, PlayLayer) {
 
     void onQuit() {
         ac::Bot::get().onLevelQuit(this);
-        ac::PathViewer::get().detach();
+        ac::PathViewer::get().detach(this);
         PlayLayer::onQuit();
+    }
+
+    void onExit() {
+        // Covers leaving the level without onQuit (e.g. another mod switching scenes).
+        ac::Bot::get().onLevelQuit(this);
+        ac::PathViewer::get().detach(this);
+        PlayLayer::onExit();
     }
 
     void resetLevel() {
