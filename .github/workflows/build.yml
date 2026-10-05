@@ -23,6 +23,8 @@ jobs:
   build:
     name: Windows
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -36,3 +38,19 @@ jobs:
         with:
           name: Auto Completer (Windows)
           path: ${{ steps.build.outputs.build-output }}
+
+      # Manual runs also commit the built files to dist/ on the same branch, so the
+      # .geode and the raw .dll can be grabbed straight from the repo.
+      - name: Publish build to dist/
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          mkdir -p dist
+          find ./build -maxdepth 1 -name '*.geode' -exec cp {} dist/ \;
+          python -c "import glob, zipfile; [zipfile.ZipFile(f).extract(n, 'dist') for f in glob.glob('dist/*.geode') for n in zipfile.ZipFile(f).namelist() if n.endswith('.dll')]"
+          ls -la dist
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f dist
+          git commit -m "Publish Windows build to dist/ [skip ci]"
+          git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
