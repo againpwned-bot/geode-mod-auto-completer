@@ -30,6 +30,8 @@ struct BotStats {
     double microsPerTick = 0.0;    // cost of one simulated tick
     double predictionError = -1.0; // average distance between prediction and reality
     int inputDelay = 0;
+    std::string model;             // how the hidden player runs GD's inlined per-tick code
+    std::string tickCalls;         // physics calls GD makes per tick
     int plannedAhead = 0;          // ticks planned ahead of the player
 };
 
@@ -46,7 +48,7 @@ public:
     void onReset(PlayLayer* layer);
     void onFrame(PlayLayer* layer);
     void beforeTick(PlayLayer* layer);
-    void afterTick(PlayLayer* layer);
+    void endFrame(PlayLayer* layer);
     void onRealDeath(PlayLayer* layer);
     void onRealComplete(PlayLayer* layer);
 
@@ -85,9 +87,9 @@ private:
     struct Calibration {
         bool active = false;
         unsigned t0 = 0;
-        std::array<std::vector<Sample>, 2> predicted;
-        std::array<double, 2> error {};
-        std::array<int, 2> count {};
+        std::array<std::vector<Sample>, PhysicsModel::kVariants> predicted;
+        std::array<double, PhysicsModel::kVariants> error {};
+        std::array<int, PhysicsModel::kVariants> count {};
     };
 
     bool supported(PlayLayer* layer, std::string& reason) const;
@@ -96,8 +98,11 @@ private:
     void releaseHold(PlayLayer* layer);
     void startCheck(PlayLayer* layer, unsigned now);
     void finishCheck();
+    void runProbe(PlayLayer* layer);
     void startCalibration(PlayLayer* layer, unsigned now);
     void finishCalibration();
+    void closeTick(PlayLayer* layer);
+    std::unique_ptr<FakeSim> makeSim(PlayLayer* layer, PhysicsModel const& model) const;
     void addSimCost(FakeSim const& sim);
     void setStatus(std::string status);
 
@@ -117,14 +122,17 @@ private:
     bool m_desyncFlagged = false;
 
     Calibration m_calibration;
-    std::array<double, 2> m_delayError { -1.0, -1.0 };
-    int m_inputDelay = 0;
+    std::array<double, PhysicsModel::kVariants> m_variantError {};
+    PhysicsModel m_model;
+    InlineProbe m_probe;
+    unsigned m_probeRevision = 0;
 
     long m_simTicks = 0;
     double m_simSeconds = 0.0;
 
     bool m_appliedHold = false;
     unsigned m_tickBefore = 0;
+    bool m_tickOpen = false;
     bool m_usedThisAttempt = false;
     bool m_requestRestart = false;
     uint32_t m_attempt = 0;

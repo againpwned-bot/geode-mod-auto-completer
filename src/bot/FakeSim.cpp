@@ -1,86 +1,147 @@
 #include "FakeSim.hpp"
 
+#include <algorithm>
 #include <chrono>
 
 using namespace geode::prelude;
 
 namespace ac {
 
+PhysicsModel PhysicsModel::variant(int index, PhysicsModel const& base) {
+    PhysicsModel model = base;
+    model.inputDelay = index % 2;
+    model.jumpVars = static_cast<Place>((index / 2) % 3);
+    model.stateVars = static_cast<Place>((index / 6) % 3);
+    return model;
+}
+
+int PhysicsModel::variantIndex() const {
+    return inputDelay % 2 + static_cast<int>(jumpVars) * 2 + static_cast<int>(stateVars) * 6;
+}
+
+std::string PhysicsModel::describe() const {
+    auto place = [](Place p) {
+        switch (p) {
+            case Place::Inside: return "in";
+            case Place::Start: return "start";
+            case Place::End: return "end";
+        }
+        return "?";
+    };
+    return fmt::format(
+        "delay {} | jump {} | state {} | pre {} | log {}",
+        inputDelay, place(jumpVars), place(stateVars), preCollision ? "on" : "in", collisionLog ? "on" : "in"
+    );
+}
+
 TickRecorder& TickRecorder::get() {
     static TickRecorder recorder;
     return recorder;
 }
 
-void TickRecorder::beginFrame(PlayerObject* player) {
-    m_framePlayer = player;
-    m_frameActive = player != nullptr;
-    m_frameOps.clear();
-    m_frameTicks = 0;
-    m_depth = 0;
-}
-
-void TickRecorder::endFrame() {
-    // Only used when the player's physics calls happen outside processCommands: split the
-    // frame's calls evenly over the ticks the frame ran.
-    if (m_frameActive && !m_tickBased && m_frameTicks > 0 && !m_frameOps.empty() &&
-        m_frameOps.size() % static_cast<size_t>(m_frameTicks) == 0) {
-        size_t const perTick = m_frameOps.size() / static_cast<size_t>(m_frameTicks);
-        m_template.assign(m_frameOps.begin(), m_frameOps.begin() + perTick);
-    }
-    m_frameActive = false;
-    m_framePlayer = nullptr;
-}
-
-void TickRecorder::beginTick(PlayerObject* player) {
+void TickRecorder::beginFrame(PlayerObject* player, unsigned progress) {
     m_player = player;
     m_active = player != nullptr;
-    m_current.clear();
-    if (m_frameActive) m_frameTicks += 1;
+    m_frameProgress = progress;
+    m_step = 0;
+    m_depth = 0;
+    m_segment.clear();
 }
 
-void TickRecorder::endTick() {
-    if (m_active && !m_current.empty()) {
-        m_template = m_current;
-        m_tickBased = true;
+void TickRecorder::stepStarted(unsigned progress) {
+    if (!m_active) return;
+    if (m_step > 0 && progress == m_stepProgress) return;
+    m_stepProgress = progress;
+    m_step += 1;
+
+    // The player's clock is advanced once per step; measure by how much.
+    double const now = m_player->m_totalTime;
+    if (m_lastTime >= 0.0 && now > m_lastTime && now - m_lastTime < 0.05) {
+        m_timeStep = now - m_lastTime;
+    }
+    m_lastTime = now;
+}
+
+void TickRecorder::endFrame(unsigned progress) {
+    // Safety net: if processCommands ever ran once per frame instead of once per step,
+    // the segment holds several steps; keep one step's worth.
+    int const ticks = progress > m_frameProgress ? static_cast<int>(progress - m_frameProgress) : 0;
+    if (m_active && m_step == 1 && ticks >= 2 && !m_segment.empty() &&
+        m_segment.size() % static_cast<size_t>(ticks) == 0) {
+        m_segment.resize(m_segment.size() / static_cast<size_t>(ticks));
+        m_step = ticks;
+    }
+    if (m_active && m_step >= 1) {
+        bool const moved = std::any_of(m_segment.begin(), m_segment.end(), [](TickOp const& op) {
+            return op.kind == TickOp::Kind::Update;
+        });
+        // A frame with 2+ steps gives a clean first step. With a single step the segment
+        // runs to the end of the frame, so it's only used until a clean one is seen.
+        bool const strong = m_step >= 2;
+        if (moved && (strong || !m_strong)) {
+            // Only a different sequence of calls counts as a new template; the step size
+            // is just refreshed.
+            bool const same = m_template.size() == m_segment.size() &&
+                std::equal(m_template.begin(), m_template.end(), m_segment.begin(), [](TickOp const& a, TickOp const& b) {
+                    return a.kind == b.kind && a.flag == b.flag;
+                });
+            m_template = m_segment;
+            if (!same) {
+                m_revision += 1;
+                log::info("Tick calls: {}", this->describe());
+            }
+            m_strong = m_strong || strong;
+        }
     }
     m_active = false;
     m_player = nullptr;
 }
 
 void TickRecorder::enter(PlayerObject* player, TickOp::Kind kind, float dt, bool flag) {
-    if (!m_active && !m_frameActive) return;
-    if (m_depth == 0) {
+    if (!m_active) return;
+    if (m_depth == 0 && player == m_player && m_step == 1) {
         TickOp op;
         op.kind = kind;
         op.dt = dt;
         op.flag = flag;
-        if (m_active && player == m_player) {
-            m_current.push_back(op);
-        }
-        else if (!m_active && m_frameActive && player == m_framePlayer) {
-            m_frameOps.push_back(op);
-        }
+        m_segment.push_back(op);
     }
     m_depth += 1;
 }
 
 void TickRecorder::leave() {
-    if ((m_active || m_frameActive) && m_depth > 0) {
+    if (m_active && m_depth > 0) {
         m_depth -= 1;
     }
 }
 
+std::string TickRecorder::describe() const {
+    std::string out;
+    for (auto const& op : m_template) {
+        if (!out.empty()) out += ' ';
+        switch (op.kind) {
+            case TickOp::Kind::ResetRings: out += "rings"; break;
+            case TickOp::Kind::Internal: out += "internal"; break;
+            case TickOp::Kind::Update: out += "update"; break;
+            case TickOp::Kind::Collide: out += "collide"; break;
+            case TickOp::Kind::Post: out += op.flag ? "post*" : "post"; break;
+            case TickOp::Kind::Rotate: out += "rotate"; break;
+        }
+    }
+    return out.empty() ? "none" : out;
+}
+
 void TickRecorder::reset() {
-    m_active = false;
     m_player = nullptr;
-    m_frameActive = false;
-    m_framePlayer = nullptr;
-    m_frameTicks = 0;
-    m_tickBased = false;
+    m_active = false;
+    m_step = 0;
     m_depth = 0;
-    m_current.clear();
-    m_frameOps.clear();
+    m_strong = false;
+    m_lastTime = -1.0;
+    m_timeStep = 0.0;
+    m_segment.clear();
     m_template.clear();
+    m_revision += 1;
 }
 
 FakeContext& fakeContext() {
@@ -126,8 +187,11 @@ void FakeWorld::detach(PlayLayer* layer) {
     m_layer = nullptr;
 }
 
-FakeSim::FakeSim(PlayLayer* layer, PlayerObject* fake, std::vector<TickOp> ops, int inputDelay, bool hold)
-    : m_layer(layer), m_fake(fake), m_ops(std::move(ops)), m_delay(inputDelay), m_held(hold), m_previousWant(hold) {
+FakeSim::FakeSim(PlayLayer* layer, PlayerObject* fake, std::vector<TickOp> ops, double timeStep, PhysicsModel model, bool hold)
+    : m_layer(layer), m_fake(fake), m_ops(std::move(ops)), m_timeStep(timeStep), m_model(model), m_held(hold), m_previousWant(hold) {
+    m_hasRingReset = std::any_of(m_ops.begin(), m_ops.end(), [](TickOp const& op) {
+        return op.kind == TickOp::Kind::ResetRings;
+    });
     auto* real = layer ? layer->m_player1 : nullptr;
     if (!real || !m_fake) return;
 
@@ -242,27 +306,101 @@ void FakeSim::release(int handle) {
     m_free.push_back(handle);
 }
 
+void FakeSim::runOp(TickOp const& op) {
+    switch (op.kind) {
+        case TickOp::Kind::ResetRings:
+            m_fake->resetTouchedRings(op.flag);
+            break;
+        case TickOp::Kind::Internal:
+            m_fake->updateInternalActions(op.dt);
+            break;
+        case TickOp::Kind::Update:
+            m_fake->update(op.dt);
+            break;
+        case TickOp::Kind::Collide:
+            m_layer->checkCollisions(m_fake, op.dt, false);
+            break;
+        case TickOp::Kind::Post:
+            m_fake->postCollision(op.dt, op.flag);
+            break;
+        case TickOp::Kind::Rotate:
+            m_fake->updateRotation(op.dt);
+            break;
+    }
+}
+
 void FakeSim::stepPhysics() {
+    using Place = PhysicsModel::Place;
     auto& ctx = fakeContext();
-    if (m_fake->m_collisionLogTop) m_fake->m_collisionLogTop->removeAllObjects();
-    if (m_fake->m_collisionLogBottom) m_fake->m_collisionLogBottom->removeAllObjects();
-    if (m_fake->m_collisionLogLeft) m_fake->m_collisionLogLeft->removeAllObjects();
-    if (m_fake->m_collisionLogRight) m_fake->m_collisionLogRight->removeAllObjects();
+    auto* player = m_fake;
+
+    // GD sets every player's clock at the start of each step.
+    if (m_timeStep > 0.0) {
+        player->m_totalTime += m_timeStep;
+    }
+    if (m_model.jumpVars == Place::Start) player->updateJumpVariables();
+    if (m_model.stateVars == Place::Start) player->updateStateVariables();
+    // GD clears the collision log right after resetting touched rings.
+    if (m_model.collisionLog && !m_hasRingReset) player->resetCollisionLog(false);
 
     for (auto const& op : m_ops) {
-        switch (op.kind) {
-            case TickOp::Kind::Update:
-                m_fake->update(op.dt);
-                break;
-            case TickOp::Kind::Collide:
-                m_layer->checkCollisions(m_fake, op.dt, false);
-                break;
-            case TickOp::Kind::Post:
-                m_fake->postCollision(op.dt, op.flag);
-                break;
+        if (op.kind == TickOp::Kind::Collide && m_model.preCollision) {
+            player->preCollision();
+        }
+        this->runOp(op);
+        if (op.kind == TickOp::Kind::ResetRings && m_model.collisionLog) {
+            player->resetCollisionLog(false);
         }
         if (ctx.died) return;
     }
+
+    if (m_model.jumpVars == Place::End) player->updateJumpVariables();
+    if (m_model.stateVars == Place::End) player->updateStateVariables();
+}
+
+InlineProbe FakeSim::probeInlines() {
+    InlineProbe result;
+    if (!m_fake || !m_layer || m_ops.empty()) return result;
+
+    auto& ctx = fakeContext();
+    FakeContext const saved = ctx;
+    ctx.active = true;
+    ctx.player = m_fake;
+    ctx.sim = this;
+    ctx.died = false;
+
+    int const base = this->save();
+    for (auto const& op : m_ops) {
+        this->load(base);
+        auto* player = m_fake;
+
+        // Values each inlined function would visibly reset.
+        player->m_wasTeleported = true;               // preCollision
+        player->m_ringJumpRelated = true;
+        player->m_touchedGravityPortal = true;        // updateJumpVariables
+        player->m_maybeTouchedBreakableBlock = true;
+        player->m_stateBoostX = 1000;                 // updateStateVariables
+        player->m_stateScale = 1000;
+        player->m_maybeStateForce2 = 1000;
+        player->m_lastCollisionBottom = 13579;        // resetCollisionLog(false)
+        player->m_unk50C = 24680;
+
+        this->runOp(op);
+
+        if (!player->m_wasTeleported && !player->m_ringJumpRelated) result.preCollision = true;
+        if (!player->m_touchedGravityPortal && !player->m_maybeTouchedBreakableBlock) result.jumpVars = true;
+        if (player->m_stateBoostX == 999 && player->m_stateScale == 999 && player->m_maybeStateForce2 == 999) {
+            result.stateVars = true;
+        }
+        if (player->m_unk50C == 13579) result.collisionLog = true;
+        ctx.died = false;
+    }
+    this->load(base);
+    this->release(base);
+
+    ctx = saved;
+    result.done = true;
+    return result;
 }
 
 RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& sample) {
@@ -288,7 +426,7 @@ RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& samp
         Mode const mode = modeOf(m_fake);
         bool const want = input(m_tick, mode);
         // The real game may apply a press one tick late; the bot measures which matches.
-        bool const apply = m_delay == 0 ? want : m_previousWant;
+        bool const apply = m_model.inputDelay == 0 ? want : m_previousWant;
         m_previousWant = want;
         if (apply != m_held) {
             if (apply) {

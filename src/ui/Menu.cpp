@@ -254,6 +254,12 @@ void drawStatsWindow(Bot& bot) {
         row("Input delay", fmt::format("{} tick", stats.inputDelay));
         row("Desyncs", std::to_string(stats.desyncs));
         row("Deaths", std::to_string(stats.deaths));
+
+        ImGui::Separator();
+        sectionLabel("Physics model");
+        ImGui::TextWrapped("%s", stats.model.empty() ? "-" : stats.model.c_str());
+        sectionLabel("Tick calls");
+        ImGui::TextWrapped("%s", stats.tickCalls.empty() ? "-" : stats.tickCalls.c_str());
     }
     ImGui::End();
 }

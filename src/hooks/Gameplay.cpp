@@ -106,7 +106,8 @@ class $modify(ACPlayLayer, PlayLayer) {
     void destroyPlayer(PlayerObject* player, GameObject* object) {
         auto& ctx = ac::fakeContext();
         if (ctx.active) {
-            if (player == ctx.player) ctx.died = true;
+            // The anticheat spike isn't physics; it must never end a simulation.
+            if (player == ctx.player && object != m_anticheatSpike) ctx.died = true;
             return;
         }
         if (isHiddenPlayer(player)) return;
@@ -162,10 +163,13 @@ class $modify(ACBaseGameLayer, GJBaseGameLayer) {
         }
         auto* playLayer = PlayLayer::get();
         auto& recorder = ac::TickRecorder::get();
-        ac::Bot::get().onFrame(playLayer);
-        recorder.beginFrame(m_player1);
+        auto& bot = ac::Bot::get();
+        bot.onFrame(playLayer);
+        recorder.beginFrame(m_player1, m_gameState.m_currentProgress);
         GJBaseGameLayer::update(dt);
-        recorder.endFrame();
+        recorder.endFrame(m_gameState.m_currentProgress);
+        // The frame's last physics step has run by now.
+        bot.endFrame(playLayer);
         ac::PathViewer::get().update(playLayer);
     }
 
@@ -174,15 +178,11 @@ class $modify(ACBaseGameLayer, GJBaseGameLayer) {
             GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
             return;
         }
-        auto* playLayer = PlayLayer::get();
-        auto& bot = ac::Bot::get();
-        auto& recorder = ac::TickRecorder::get();
-
-        bot.beforeTick(playLayer);
-        recorder.beginTick(m_player1);
+        // Each step starts here; GD may move the player inside processCommands or right
+        // after it, so a step is only known to be finished when the next one starts.
+        ac::TickRecorder::get().stepStarted(m_gameState.m_currentProgress);
+        ac::Bot::get().beforeTick(PlayLayer::get());
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-        recorder.endTick();
-        bot.afterTick(playLayer);
     }
 
     void handleButton(bool down, int button, bool isPlayer1) {
@@ -254,6 +254,27 @@ class $modify(ACBaseGameLayer, GJBaseGameLayer) {
 };
 
 class $modify(ACPlayerObject, PlayerObject) {
+    void resetTouchedRings(bool removeAll) {
+        auto& recorder = ac::TickRecorder::get();
+        recorder.enter(this, ac::TickOp::Kind::ResetRings, 0.f, removeAll);
+        PlayerObject::resetTouchedRings(removeAll);
+        recorder.leave();
+    }
+
+    void updateInternalActions(float dt) {
+        auto& recorder = ac::TickRecorder::get();
+        recorder.enter(this, ac::TickOp::Kind::Internal, dt, false);
+        PlayerObject::updateInternalActions(dt);
+        recorder.leave();
+    }
+
+    void updateRotation(float dt) {
+        auto& recorder = ac::TickRecorder::get();
+        recorder.enter(this, ac::TickOp::Kind::Rotate, dt, false);
+        PlayerObject::updateRotation(dt);
+        recorder.leave();
+    }
+
     void update(float dt) {
         auto& recorder = ac::TickRecorder::get();
         recorder.enter(this, ac::TickOp::Kind::Update, dt, false);

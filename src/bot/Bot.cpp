@@ -115,6 +115,7 @@ void Bot::resetAttempt() {
     m_lastCheck = -1000000;
     m_forceCheck = false;
     m_desyncFlagged = false;
+    m_tickOpen = false;
     m_usedThisAttempt = false;
     m_stats.clicks = 0;
     m_stats.plannedAhead = 0;
@@ -127,8 +128,9 @@ void Bot::onLevelInit(PlayLayer* layer) {
     m_appliedHold = false;
     m_requestRestart = false;
     m_stats = BotStats{};
-    m_delayError = { -1.0, -1.0 };
-    m_inputDelay = 0;
+    m_variantError.fill(-1.0);
+    m_model = PhysicsModel{};
+    m_probe = InlineProbe{};
     m_simTicks = 0;
     m_simSeconds = 0.0;
     TickRecorder::get().reset();
@@ -220,8 +222,12 @@ void Bot::onFrame(PlayLayer* layer) {
         this->setStatus("Could not create the simulation player");
         return;
     }
-    // The first real tick tells us which physics calls GD makes per tick.
-    if (!TickRecorder::get().ready()) return;
+    // The first real ticks tell us which physics calls GD makes per tick.
+    auto& recorder = TickRecorder::get();
+    if (!recorder.ready()) return;
+    if (!m_probe.done || m_probeRevision != recorder.revision()) {
+        this->runProbe(layer);
+    }
 
     unsigned const now = layer->m_gameState.m_currentProgress;
     auto const budget = std::chrono::microseconds(std::clamp<int64_t>(settings::liveBudget(), 1, 30) * 1000);
@@ -273,9 +279,7 @@ void Bot::startCheck(PlayLayer* layer, unsigned now) {
     }
     check->seedSize = static_cast<int>(seed.size());
 
-    check->sim = std::make_unique<FakeSim>(
-        layer, FakeWorld::get().player(), TickRecorder::get().ops(), m_inputDelay, m_appliedHold
-    );
+    check->sim = this->makeSim(layer, m_model);
 
     uint32_t const seedValue = static_cast<uint32_t>(layer->m_level->m_levelID.value()) * 2654435761u ^
         (m_attempt * 7919u) ^ (now * 40503u);
@@ -335,23 +339,55 @@ void Bot::finishCheck() {
     m_check.reset();
 }
 
+std::unique_ptr<FakeSim> Bot::makeSim(PlayLayer* layer, PhysicsModel const& model) const {
+    auto const& recorder = TickRecorder::get();
+    return std::make_unique<FakeSim>(
+        layer, FakeWorld::get().player(), recorder.ops(), recorder.timeStep(), model, m_appliedHold
+    );
+}
+
+void Bot::runProbe(PlayLayer* layer) {
+    using Place = PhysicsModel::Place;
+    auto const& recorder = TickRecorder::get();
+    m_check.reset();
+    m_calibration = Calibration{};
+
+    auto sim = this->makeSim(layer, m_model);
+    m_probe = sim->probeInlines();
+    m_probe.done = true;
+    m_probeRevision = recorder.revision();
+    this->addSimCost(*sim);
+
+    // Run each inlined function only where the recorded calls don't already contain it.
+    m_model.preCollision = !m_probe.preCollision;
+    m_model.collisionLog = !m_probe.collisionLog;
+    m_model.jumpVars = m_probe.jumpVars ? Place::Inside : Place::Start;
+    m_model.stateVars = m_probe.stateVars ? Place::Inside : Place::Start;
+    m_variantError.fill(-1.0);
+
+    m_stats.model = m_model.describe();
+    m_stats.tickCalls = recorder.describe();
+    m_stats.inputDelay = m_model.inputDelay;
+    log::info("Tick calls: {} | step {:.6f} s | model: {}", m_stats.tickCalls, recorder.timeStep(), m_stats.model);
+}
+
 void Bot::startCalibration(PlayLayer* layer, unsigned now) {
     auto& cal = m_calibration;
     cal = Calibration{};
     cal.active = true;
     cal.t0 = now;
 
-    for (int delay = 0; delay < 2; ++delay) {
-        FakeSim sim(layer, FakeWorld::get().player(), TickRecorder::get().ops(), delay, m_appliedHold);
-        auto& out = cal.predicted[delay];
+    InputFn input = [this, now](int t, Mode) {
+        int const tick = static_cast<int>(now) + t;
+        return tick < m_planEnd && tick < static_cast<int>(m_inputs.size()) && m_inputs[tick] != 0;
+    };
+    for (int v = 0; v < PhysicsModel::kVariants; ++v) {
+        auto sim = this->makeSim(layer, PhysicsModel::variant(v, m_model));
+        auto& out = cal.predicted[v];
         out.reserve(kCalibrationTicks);
-        InputFn input = [this, now](int t, Mode) {
-            int const tick = static_cast<int>(now) + t;
-            return tick < m_planEnd && tick < static_cast<int>(m_inputs.size()) && m_inputs[tick] != 0;
-        };
         SampleFn sample = [&out](int, Sample const& s) { out.push_back(s); };
-        sim.run(kCalibrationTicks, input, sample);
-        this->addSimCost(sim);
+        sim->run(kCalibrationTicks, input, sample);
+        this->addSimCost(*sim);
     }
 }
 
@@ -359,21 +395,28 @@ void Bot::finishCalibration() {
     auto& cal = m_calibration;
     cal.active = false;
 
-    for (int delay = 0; delay < 2; ++delay) {
-        if (cal.count[delay] == 0) continue;
-        double const average = cal.error[delay] / cal.count[delay];
-        m_delayError[delay] = m_delayError[delay] < 0.0 ? average : m_delayError[delay] * 0.85 + average * 0.15;
+    for (int v = 0; v < PhysicsModel::kVariants; ++v) {
+        if (cal.count[v] == 0) continue;
+        double const average = cal.error[v] / cal.count[v];
+        m_variantError[v] = m_variantError[v] < 0.0 ? average : m_variantError[v] * 0.85 + average * 0.15;
     }
-    if (m_delayError[0] >= 0.0 && m_delayError[1] >= 0.0) {
-        // Switch only for a clear improvement, so ties keep the current model.
-        int const other = 1 - m_inputDelay;
-        if (m_delayError[other] + 0.05 < m_delayError[m_inputDelay]) {
-            m_inputDelay = other;
-            log::info("Input timing model switched to {} tick delay", m_inputDelay);
+
+    int const current = m_model.variantIndex();
+    int best = current;
+    for (int v = 0; v < PhysicsModel::kVariants; ++v) {
+        if (m_variantError[v] >= 0.0 && (m_variantError[best] < 0.0 || m_variantError[v] < m_variantError[best])) {
+            best = v;
         }
     }
-    m_stats.inputDelay = m_inputDelay;
-    m_stats.predictionError = m_delayError[m_inputDelay];
+    // Switch only for a clear improvement, so ties keep the current model.
+    if (best != current && m_variantError[current] >= 0.0 &&
+        m_variantError[best] + std::max(0.02, m_variantError[current] * 0.1) < m_variantError[current]) {
+        m_model = PhysicsModel::variant(best, m_model);
+        m_stats.model = m_model.describe();
+        log::info("Physics model switched to: {}", m_stats.model);
+    }
+    m_stats.inputDelay = m_model.inputDelay;
+    m_stats.predictionError = m_variantError[m_model.variantIndex()];
 }
 
 void Bot::addSimCost(FakeSim const& sim) {
@@ -385,8 +428,15 @@ void Bot::addSimCost(FakeSim const& sim) {
 }
 
 void Bot::beforeTick(PlayLayer* layer) {
-    m_tickBefore = layer->m_gameState.m_currentProgress;
+    unsigned const progress = layer->m_gameState.m_currentProgress;
+    // A new step starting means the previous one is fully done. A second call for the same
+    // tick (half step) isn't a new tick.
+    if (!m_tickOpen || progress != m_tickBefore) {
+        this->closeTick(layer);
+    }
+    m_tickBefore = progress;
     if (m_state != BotState::Playing) return;
+    m_tickOpen = true;
 
     bool const want = static_cast<int>(m_tickBefore) < m_planEnd &&
         m_tickBefore < m_inputs.size() && m_inputs[m_tickBefore] != 0;
@@ -398,8 +448,14 @@ void Bot::beforeTick(PlayLayer* layer) {
     m_usedThisAttempt = true;
 }
 
-void Bot::afterTick(PlayLayer* layer) {
-    if (m_state != BotState::Playing || !layer->m_player1) return;
+void Bot::endFrame(PlayLayer* layer) {
+    this->closeTick(layer);
+}
+
+void Bot::closeTick(PlayLayer* layer) {
+    if (!m_tickOpen) return;
+    m_tickOpen = false;
+    if (m_state != BotState::Playing || !layer || !layer->m_player1) return;
     auto const actual = layer->m_player1->getPosition();
     unsigned const tick = m_tickBefore;
 
@@ -407,11 +463,11 @@ void Bot::afterTick(PlayLayer* layer) {
     if (cal.active) {
         int const rel = static_cast<int>(tick) - static_cast<int>(cal.t0);
         if (rel >= 0 && rel < kCalibrationTicks) {
-            for (int delay = 0; delay < 2; ++delay) {
-                if (rel < static_cast<int>(cal.predicted[delay].size())) {
-                    auto const& p = cal.predicted[delay][rel];
-                    cal.error[delay] += std::abs(p.x - actual.x) + std::abs(p.y - actual.y);
-                    cal.count[delay] += 1;
+            for (int v = 0; v < PhysicsModel::kVariants; ++v) {
+                if (rel < static_cast<int>(cal.predicted[v].size())) {
+                    auto const& p = cal.predicted[v][rel];
+                    cal.error[v] += std::abs(p.x - actual.x) + std::abs(p.y - actual.y);
+                    cal.count[v] += 1;
                 }
             }
         }

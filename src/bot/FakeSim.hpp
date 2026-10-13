@@ -5,6 +5,7 @@
 #include "../planner/Planner.hpp"
 #include "PlayerState.hpp"
 
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -12,42 +13,78 @@ namespace ac {
 
 // One physics call the real game makes on player 1 during a tick.
 struct TickOp {
-    enum class Kind : uint8_t { Update, Collide, Post };
+    enum class Kind : uint8_t { ResetRings, Internal, Update, Collide, Post, Rotate };
     Kind kind = Kind::Update;
     float dt = 0.f;
     bool flag = false;
 };
 
-// Records the sequence of player physics calls (update / checkCollisions / postCollision)
-// the real game makes in one tick, so the hidden player can replay exactly the same steps
-// instead of guessing GD's internal order.
+// GD also runs a few small per-tick functions that are inlined on Windows, so they can't be
+// hooked or recorded: preCollision, resetCollisionLog, updateJumpVariables and
+// updateStateVariables. This says where the hidden player runs them.
+struct PhysicsModel {
+    // Inside: already part of one of the recorded calls, don't run it again.
+    // Start / End: run it at the start (after the input) or the end of the tick.
+    enum class Place : uint8_t { Inside, Start, End };
+
+    int inputDelay = 0;
+    Place jumpVars = Place::Start;
+    Place stateVars = Place::Start;
+    bool preCollision = true;   // run preCollision before each checkCollisions
+    bool collisionLog = true;   // run resetCollisionLog(false) once per tick
+
+    static constexpr int kVariants = 18;
+    // Calibration candidates: input delay x jump variables x state variables.
+    static PhysicsModel variant(int index, PhysicsModel const& base);
+    int variantIndex() const;
+    std::string describe() const;
+};
+
+// Which inlined functions turned out to already run inside the recorded calls.
+struct InlineProbe {
+    bool done = false;
+    bool preCollision = false;
+    bool collisionLog = false;
+    bool jumpVars = false;
+    bool stateVars = false;
+};
+
+// Records the player physics calls GD makes in one tick (one processCommands step), so the
+// hidden player replays exactly the same steps instead of guessing GD's internal order.
+// The calls are split at each processCommands call, so it works whether GD makes them
+// inside processCommands or after it.
 class TickRecorder {
 public:
     static TickRecorder& get();
 
-    // Frame level fallback, in case GD moves the player outside processCommands.
-    void beginFrame(PlayerObject* player);
-    void endFrame();
-    void beginTick(PlayerObject* player);
-    void endTick();
+    void beginFrame(PlayerObject* player, unsigned progress);
+    // Called at each processCommands; a new step only when the tick counter moved.
+    void stepStarted(unsigned progress);
+    void endFrame(unsigned progress);
     // Called by the hooks around each physics call; nested calls are ignored.
     void enter(PlayerObject* player, TickOp::Kind kind, float dt, bool flag);
     void leave();
 
     bool ready() const { return !m_template.empty(); }
     std::vector<TickOp> const& ops() const { return m_template; }
+    // Player clock advance per tick in seconds, 0 if not measured yet.
+    double timeStep() const { return m_timeStep; }
+    unsigned revision() const { return m_revision; }
+    std::string describe() const;
     void reset();
 
 private:
     PlayerObject* m_player = nullptr;
     bool m_active = false;
-    PlayerObject* m_framePlayer = nullptr;
-    bool m_frameActive = false;
-    int m_frameTicks = 0;
-    bool m_tickBased = false;
+    int m_step = 0;
     int m_depth = 0;
-    std::vector<TickOp> m_current;
-    std::vector<TickOp> m_frameOps;
+    unsigned m_frameProgress = 0;
+    unsigned m_stepProgress = 0;
+    bool m_strong = false;
+    unsigned m_revision = 0;
+    double m_lastTime = -1.0;
+    double m_timeStep = 0.0;
+    std::vector<TickOp> m_segment;
     std::vector<TickOp> m_template;
 };
 
@@ -85,7 +122,7 @@ private:
 class FakeSim final : public Simulator {
 public:
     // Copies the real player 1 onto the hidden player; tick 0 is the real game's current tick.
-    FakeSim(PlayLayer* layer, PlayerObject* fake, std::vector<TickOp> ops, int inputDelay, bool hold);
+    FakeSim(PlayLayer* layer, PlayerObject* fake, std::vector<TickOp> ops, double timeStep, PhysicsModel model, bool hold);
     ~FakeSim() override;
 
     FakeSim(FakeSim const&) = delete;
@@ -104,6 +141,10 @@ public:
 
     // Remembers an orb or pad before the hidden player may activate it.
     void noteObject(GameObject* object);
+
+    // Runs each recorded call once with marker values to see which inlined functions it
+    // already contains. Leaves the hidden player as it was.
+    InlineProbe probeInlines();
 
     long ticksRun() const { return m_ticksRun; }
     double secondsRun() const { return m_secondsRun; }
@@ -130,12 +171,15 @@ private:
     static Flags read(EnhancedGameObject* object);
     static void write(EnhancedGameObject* object, Flags const& flags);
     void restoreBaseline();
+    void runOp(TickOp const& op);
     void stepPhysics();
 
     PlayLayer* m_layer = nullptr;
     PlayerObject* m_fake = nullptr;
     std::vector<TickOp> m_ops;
-    int m_delay = 0;
+    double m_timeStep = 0.0;
+    PhysicsModel m_model;
+    bool m_hasRingReset = false;
     bool m_held = false;
     bool m_previousWant = false;
     int m_tick = 0;
