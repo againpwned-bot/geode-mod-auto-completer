@@ -251,6 +251,15 @@ void drawStatsWindow(Bot& bot) {
             ImVec4 const& color = stats.predictionError < 0.5 ? kGood : stats.predictionError < 2.0 ? kWarn : kBad;
             row("Prediction", fmt::format("off by {:.2f}", stats.predictionError), &color);
         }
+        if (stats.shadowTicks > 0) {
+            double const match = 100.0 * static_cast<double>(stats.shadowTicks - stats.shadowMismatches) /
+                static_cast<double>(stats.shadowTicks);
+            ImVec4 const& color = match > 99.0 ? kGood : match > 90.0 ? kWarn : kBad;
+            row("Tick match", fmt::format("{:.1f}%", match), &color);
+        }
+        else {
+            row("Tick match", "-");
+        }
         row("Input delay", fmt::format("{} tick", stats.inputDelay));
         row("Desyncs", std::to_string(stats.desyncs));
         row("Deaths", std::to_string(stats.deaths));

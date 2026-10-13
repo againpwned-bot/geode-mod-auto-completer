@@ -1,3 +1,7 @@
+# v1.2.2
+- Fix: the hidden player copied only part of the real player's state. It now copies every physics field GD uses (171 of them), including the level's 2.2 physics flags, the boost/fall state and the slope state, so it jumps exactly like the real one.
+- Diagnostics: every real tick is replayed on the hidden player and compared ("Tick match" in Stats). Differences, a jump self test and what killed the simulation are written to the Geode log.
+
 # v1.2.1
 - Fix: the bot jumped too early and glitched on blocks. The hidden player now runs GD's per-tick housekeeping (collision limits, collision log, jump and state timers, player clock) like the real one.
 - Fix: predictions were compared against the real player one tick too early, which made the bot pick the wrong input timing.

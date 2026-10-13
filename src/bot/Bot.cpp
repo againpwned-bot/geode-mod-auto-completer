@@ -116,6 +116,8 @@ void Bot::resetAttempt() {
     m_forceCheck = false;
     m_desyncFlagged = false;
     m_tickOpen = false;
+    m_shadowValid = false;
+    m_selfTestDone = false;
     m_usedThisAttempt = false;
     m_stats.clicks = 0;
     m_stats.plannedAhead = 0;
@@ -131,6 +133,8 @@ void Bot::onLevelInit(PlayLayer* layer) {
     m_variantError.fill(-1.0);
     m_model = PhysicsModel{};
     m_probe = InlineProbe{};
+    m_shadowLogged = 0;
+    m_selfTests = 0;
     m_simTicks = 0;
     m_simSeconds = 0.0;
     TickRecorder::get().reset();
@@ -227,6 +231,10 @@ void Bot::onFrame(PlayLayer* layer) {
     if (!recorder.ready()) return;
     if (!m_probe.done || m_probeRevision != recorder.revision()) {
         this->runProbe(layer);
+    }
+    if (!m_selfTestDone && m_selfTests < 3 && modeOf(layer->m_player1) == Mode::Cube &&
+        layer->m_player1->m_isOnGround && layer->m_player1->getPositionX() > 0.f) {
+        this->runSelfTest(layer);
     }
 
     unsigned const now = layer->m_gameState.m_currentProgress;
@@ -331,6 +339,7 @@ void Bot::finishCheck() {
     if (status == Planner::Status::Stuck) {
         float const at = end > 0 ? progressOf(m_layer, samples[end - 1].x) : 0.f;
         this->setStatus(fmt::format("No safe path found ahead (around {})", percent(at)));
+        this->logDeath(*check.sim);
     }
     else {
         this->setStatus("Playing");
@@ -436,10 +445,18 @@ void Bot::beforeTick(PlayLayer* layer) {
     }
     m_tickBefore = progress;
     if (m_state != BotState::Playing) return;
+    bool const fresh = !m_tickOpen;
     m_tickOpen = true;
 
     bool const want = static_cast<int>(m_tickBefore) < m_planEnd &&
         m_tickBefore < m_inputs.size() && m_inputs[m_tickBefore] != 0;
+    if (fresh && m_probe.done && TickRecorder::get().ready() && layer->m_player1) {
+        // Remember the state before this tick so it can be replayed on the hidden player.
+        m_shadowPre.capture(layer->m_player1);
+        m_shadowHeld = m_appliedHold;
+        m_shadowWant = want;
+        m_shadowValid = true;
+    }
     if (want != m_appliedHold) {
         if (want) m_stats.clicks += 1;
         applyJump(layer, want);
@@ -476,6 +493,10 @@ void Bot::closeTick(PlayLayer* layer) {
         }
     }
 
+    if (m_shadowValid) {
+        this->runShadow(layer);
+    }
+
     // If reality drifts from the prediction, re-check right away.
     if (static_cast<int>(tick) < m_planEnd && tick < m_samples.size() && !m_desyncFlagged) {
         auto const& expected = m_samples[tick];
@@ -488,6 +509,109 @@ void Bot::closeTick(PlayLayer* layer) {
             }
         }
     }
+}
+
+void Bot::runShadow(PlayLayer* layer) {
+    m_shadowValid = false;
+    auto* real = layer->m_player1;
+    auto* fake = FakeWorld::get().player();
+    if (!real || !fake || real->m_isDead) return;
+    auto const& recorder = TickRecorder::get();
+
+    PlayerFix after;
+    after.capture(real);
+
+    // Same tick, same input, same starting state: the hidden player must end up identical.
+    PhysicsModel model = m_model;
+    model.inputDelay = 0;
+    FakeSim sim(layer, fake, recorder.ops(), recorder.timeStep(), model, m_shadowHeld, &m_shadowPre);
+    if (recorder.timeStep() > 0.0) {
+        sim.setClock(after.m_totalTime - recorder.timeStep());
+    }
+    bool const want = m_shadowWant;
+    sim.run(1, [want](int, Mode) { return want; }, [](int, Sample const&) {});
+    PlayerFix simulated;
+    sim.captureState(simulated);
+
+    size_t count = 0;
+    std::string const fields = after.diff(simulated, 10, &count);
+    m_stats.shadowTicks += 1;
+    if (count == 0) return;
+    m_stats.shadowMismatches += 1;
+    if (m_shadowLogged < 60 || m_stats.shadowMismatches % 240 == 0) {
+        m_shadowLogged += 1;
+        log::info(
+            "Tick check {} (input {}->{}, {}): {} field(s) differ (real/sim): {}",
+            m_tickBefore, m_shadowHeld ? 1 : 0, want ? 1 : 0, sim.lastDeath().valid ? "sim died" : "alive",
+            count, fields
+        );
+    }
+}
+
+void Bot::runSelfTest(PlayLayer* layer) {
+    m_selfTestDone = true;
+    m_selfTests += 1;
+    auto* real = layer->m_player1;
+
+    struct Result {
+        float rise = 0.f;
+        int airTicks = 0;
+        float dx = 0.f;
+        int died = -1;
+        std::string killer;
+    };
+    auto test = [&](int pressAt) {
+        Result r;
+        PhysicsModel model = m_model;
+        auto sim = this->makeSim(layer, model);
+        float const x0 = real->getPositionX();
+        float const y0 = real->getPositionY();
+        int lastAir = -1;
+        int firstAir = -1;
+        InputFn input = [pressAt](int t, Mode) { return pressAt >= 0 && t >= pressAt && t < pressAt + 6; };
+        SampleFn sample = [&](int t, Sample const& s) {
+            r.rise = std::max(r.rise, s.y - y0);
+            r.dx = s.x - x0;
+            if (std::abs(s.y - y0) > 0.5f) {
+                if (firstAir < 0) firstAir = t;
+                lastAir = t;
+            }
+        };
+        auto const result = sim->run(90, input, sample);
+        if (result.event == Event::Died) {
+            r.died = result.eventTick;
+            auto const& d = sim->lastDeath();
+            r.killer = fmt::format("obj {} type {} at ({:.0f},{:.0f})", d.objectId, d.objectType, d.objectX, d.objectY);
+        }
+        r.airTicks = firstAir >= 0 ? lastAir - firstAir + 1 : 0;
+        return r;
+    };
+    auto show = [](Result const& r) {
+        std::string out = fmt::format("rise {:.1f}, air {} ticks, dx {:.1f}", r.rise, r.airTicks, r.dx);
+        if (r.died >= 0) out += fmt::format(", died at tick {} ({})", r.died, r.killer);
+        return out;
+    };
+
+    Result const now = test(0);
+    Result const later = test(12);
+    Result const none = test(-1);
+    log::info(
+        "Self test {}: real at ({:.1f},{:.1f}) vy {:.3f} ground {}/{}/{} buffered {} 22changes {} impulsefix {} speed {:.3f} | press now: {} | press at 12: {} | no press: {}",
+        m_selfTests, real->getPositionX(), real->getPositionY(), real->m_yVelocity,
+        real->m_isOnGround ? 1 : 0, real->m_isOnGround2 ? 1 : 0, real->m_isOnGround3 ? 1 : 0,
+        real->m_jumpBuffered ? 1 : 0, real->m_enable22Changes ? 1 : 0, real->m_enableImpulseFix ? 1 : 0,
+        real->m_playerSpeed, show(now), show(later), show(none)
+    );
+}
+
+void Bot::logDeath(FakeSim const& sim) {
+    auto const& d = sim.lastDeath();
+    if (!d.valid) return;
+    float const realX = m_layer && m_layer->m_player1 ? m_layer->m_player1->getPositionX() : 0.f;
+    log::info(
+        "Simulation died {} ticks ahead at ({:.1f},{:.1f}) by obj {} type {} at ({:.1f},{:.1f}); real player at x {:.1f}",
+        d.tick, d.x, d.y, d.objectId, d.objectType, d.objectX, d.objectY, realX
+    );
 }
 
 void Bot::onRealDeath(PlayLayer* layer) {

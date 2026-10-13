@@ -187,7 +187,10 @@ void FakeWorld::detach(PlayLayer* layer) {
     m_layer = nullptr;
 }
 
-FakeSim::FakeSim(PlayLayer* layer, PlayerObject* fake, std::vector<TickOp> ops, double timeStep, PhysicsModel model, bool hold)
+FakeSim::FakeSim(
+    PlayLayer* layer, PlayerObject* fake, std::vector<TickOp> ops, double timeStep, PhysicsModel model,
+    bool hold, PlayerFix const* from
+)
     : m_layer(layer), m_fake(fake), m_ops(std::move(ops)), m_timeStep(timeStep), m_model(model), m_held(hold), m_previousWant(hold) {
     m_hasRingReset = std::any_of(m_ops.begin(), m_ops.end(), [](TickOp const& op) {
         return op.kind == TickOp::Kind::ResetRings;
@@ -196,10 +199,16 @@ FakeSim::FakeSim(PlayLayer* layer, PlayerObject* fake, std::vector<TickOp> ops, 
     if (!real || !m_fake) return;
 
     m_fake->copyAttributes(real);
-    PlayerFix fix;
-    fix.capture(real);
-    fix.apply(m_fake);
+    if (from) {
+        from->apply(m_fake);
+    }
+    else {
+        PlayerFix fix;
+        fix.capture(real);
+        fix.apply(m_fake);
+    }
     m_fake->m_isDead = false;
+    m_fake->m_ignoreDamage = false;
     m_fake->m_playEffects = false;
     m_fake->setVisible(false);
 }
@@ -418,6 +427,7 @@ RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& samp
     ctx.player = m_fake;
     ctx.sim = this;
     ctx.died = false;
+    ctx.killer = nullptr;
 
     auto const begin = std::chrono::steady_clock::now();
     float const levelEnd = m_layer->m_levelLength;
@@ -453,6 +463,17 @@ RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& samp
         if (ctx.died) {
             result.event = Event::Died;
             result.eventTick = tick;
+            m_lastDeath = DeathInfo{};
+            m_lastDeath.valid = true;
+            m_lastDeath.tick = tick;
+            m_lastDeath.x = s.x;
+            m_lastDeath.y = s.y;
+            if (auto* killer = ctx.killer) {
+                m_lastDeath.objectId = killer->m_objectID;
+                m_lastDeath.objectType = static_cast<int>(killer->m_objectType);
+                m_lastDeath.objectX = killer->getPositionX();
+                m_lastDeath.objectY = killer->getPositionY();
+            }
             break;
         }
         if (levelEnd > 0.f && s.x >= levelEnd) {

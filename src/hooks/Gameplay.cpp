@@ -107,7 +107,10 @@ class $modify(ACPlayLayer, PlayLayer) {
         auto& ctx = ac::fakeContext();
         if (ctx.active) {
             // The anticheat spike isn't physics; it must never end a simulation.
-            if (player == ctx.player && object != m_anticheatSpike) ctx.died = true;
+            if (player == ctx.player && object != m_anticheatSpike) {
+                ctx.died = true;
+                ctx.killer = object;
+            }
             return;
         }
         if (isHiddenPlayer(player)) return;

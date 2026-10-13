@@ -1,5 +1,7 @@
 #include "PlayerState.hpp"
 
+#include <cmath>
+
 using namespace geode::prelude;
 
 namespace ac {
@@ -30,89 +32,67 @@ Mode modeOf(PlayerObject* player) {
     return Mode::Cube;
 }
 
+namespace {
+    template <class T>
+    bool sameValue(T const& a, T const& b) {
+        if constexpr (std::is_same_v<T, bool>) {
+            return a == b;
+        }
+        else if constexpr (std::is_floating_point_v<T>) {
+            return std::abs(static_cast<double>(a) - static_cast<double>(b)) <= 1e-3;
+        }
+        else if constexpr (std::is_arithmetic_v<T> || std::is_enum_v<T> || std::is_pointer_v<T>) {
+            return a == b;
+        }
+        else if constexpr (std::is_same_v<T, cocos2d::CCPoint>) {
+            return std::abs(a.x - b.x) <= 1e-3f && std::abs(a.y - b.y) <= 1e-3f;
+        }
+        else if constexpr (requires { a.size(); }) {
+            return a.size() == b.size();
+        }
+        else {
+            return true;
+        }
+    }
+
+    template <class T>
+    std::string showValue(T const& value) {
+        if constexpr (std::is_same_v<T, bool>) {
+            return value ? "1" : "0";
+        }
+        else if constexpr (std::is_floating_point_v<T>) {
+            return fmt::format("{:.4f}", static_cast<double>(value));
+        }
+        else if constexpr (std::is_arithmetic_v<T>) {
+            return fmt::format("{}", static_cast<long long>(value));
+        }
+        else if constexpr (std::is_enum_v<T>) {
+            return fmt::format("{}", static_cast<long long>(value));
+        }
+        else if constexpr (std::is_pointer_v<T>) {
+            return value ? "obj" : "null";
+        }
+        else if constexpr (std::is_same_v<T, cocos2d::CCPoint>) {
+            return fmt::format("({:.3f},{:.3f})", value.x, value.y);
+        }
+        else if constexpr (requires { value.size(); }) {
+            return fmt::format("[{}]", value.size());
+        }
+        else {
+            return "?";
+        }
+    }
+}
+
 void PlayerFix::capture(PlayerObject* player) {
     valid = player != nullptr;
     if (!player) return;
 
     nodePosition = player->getPosition();
     rotation = player->getRotation();
-    position = player->m_position;
-    yVelocity = player->m_yVelocity;
-    fallSpeed = player->m_fallSpeed;
-    yVelocityBeforeSlope = player->m_yVelocityBeforeSlope;
-    groundYVelocity = player->m_groundYVelocity;
-    yVelocityRelated = player->m_yVelocityRelated;
-    yVelocityRelated3 = player->m_yVelocityRelated3;
-    slopeVelocity = player->m_slopeVelocity;
-    currentSlopeYVelocity = player->m_currentSlopeYVelocity;
-    platformerXVelocity = player->m_platformerXVelocity;
-    isOnGround = player->m_isOnGround;
-    isOnGround2 = player->m_isOnGround2;
-    isOnGround3 = player->m_isOnGround3;
-    isOnGround4 = player->m_isOnGround4;
-    isOnSlope = player->m_isOnSlope;
-    wasOnSlope = player->m_wasOnSlope;
-    lastJumpTime = player->m_lastJumpTime;
-    lastLandTime = player->m_lastLandTime;
-    lastFlipTime = player->m_lastFlipTime;
-    lastSpiderFlipTime = player->m_lastSpiderFlipTime;
-    totalTime = player->m_totalTime;
-    jumpBuffered = player->m_jumpBuffered;
-    stateRingJump = player->m_stateRingJump;
-    wasJumpBuffered = player->m_wasJumpBuffered;
-    wasRobotJump = player->m_wasRobotJump;
-    stateJumpBuffered = player->m_stateJumpBuffered;
-    stateRingJump2 = player->m_stateRingJump2;
-    touchedRing = player->m_touchedRing;
-    touchedCustomRing = player->m_touchedCustomRing;
-    touchedGravityPortal = player->m_touchedGravityPortal;
-    touchedPad = player->m_touchedPad;
-    ringJumpRelated = player->m_ringJumpRelated;
-    padRingRelated = player->m_padRingRelated;
-    hasEverJumped = player->m_hasEverJumped;
-    hasEverHitRing = player->m_hasEverHitRing;
-    fixRobotJump = player->m_fixRobotJump;
-    stateNoAutoJump = player->m_stateNoAutoJump;
-    stateOnGround = player->m_stateOnGround;
-    stateHitHead = player->m_stateHitHead;
-    stateFlipGravity = player->m_stateFlipGravity;
-    stateDartSlide = player->m_stateDartSlide;
-    stateBoostX = player->m_stateBoostX;
-    stateBoostY = player->m_stateBoostY;
-    stateForce2 = player->m_maybeStateForce2;
-    stateScale = player->m_stateScale;
-    stateForce = player->m_stateForce;
-    stateForceVector = player->m_stateForceVector;
-    wasTeleported = player->m_wasTeleported;
-    touchedBreakableBlock = player->m_maybeTouchedBreakableBlock;
-    lastCollisionBottom = player->m_lastCollisionBottom;
-    lastCollisionTop = player->m_lastCollisionTop;
-    lastCollisionLeft = player->m_lastCollisionLeft;
-    lastCollisionRight = player->m_lastCollisionRight;
-    previousCollisionBottom = player->m_unk50C;
-    previousCollisionTop = player->m_unk510;
-    slopeStartTime = player->m_slopeStartTime;
-    slopeEndTime = player->m_slopeEndTime;
-    slidingTime = player->m_maybeSlidingTime;
-    slidingStartTime = player->m_maybeSlidingStartTime;
-    collidedTopMinY = player->m_collidedTopMinY;
-    collidedBottomMaxY = player->m_collidedBottomMaxY;
-    collidedLeftMaxX = player->m_collidedLeftMaxX;
-    collidedRightMinX = player->m_collidedRightMinX;
-    isUpsideDown = player->m_isUpsideDown;
-    playerSpeed = player->m_playerSpeed;
-    vehicleSize = player->m_vehicleSize;
-    gravityMod = player->m_gravityMod;
-    isDashing = player->m_isDashing;
-    dashX = player->m_dashX;
-    dashY = player->m_dashY;
-    dashAngle = player->m_dashAngle;
-    dashStartTime = player->m_dashStartTime;
-    dashRing = player->m_dashRing;
-    dashFireFrame = player->m_dashFireFrame;
-    holdingButtons = player->m_holdingButtons;
-    jumpPadRelated = player->m_jumpPadRelated;
-    touchedRings = player->m_touchedRings;
+#define AC_CAPTURE_FIELD(name) name = player->name;
+    AC_PLAYER_FIELDS(AC_CAPTURE_FIELD)
+#undef AC_CAPTURE_FIELD
 }
 
 void PlayerFix::apply(PlayerObject* player) const {
@@ -120,83 +100,29 @@ void PlayerFix::apply(PlayerObject* player) const {
 
     player->setPosition(nodePosition);
     player->setRotation(rotation);
-    player->m_position = position;
-    player->m_yVelocity = yVelocity;
-    player->m_fallSpeed = fallSpeed;
-    player->m_yVelocityBeforeSlope = yVelocityBeforeSlope;
-    player->m_groundYVelocity = groundYVelocity;
-    player->m_yVelocityRelated = yVelocityRelated;
-    player->m_yVelocityRelated3 = yVelocityRelated3;
-    player->m_slopeVelocity = slopeVelocity;
-    player->m_currentSlopeYVelocity = currentSlopeYVelocity;
-    player->m_platformerXVelocity = platformerXVelocity;
-    player->m_isOnGround = isOnGround;
-    player->m_isOnGround2 = isOnGround2;
-    player->m_isOnGround3 = isOnGround3;
-    player->m_isOnGround4 = isOnGround4;
-    player->m_isOnSlope = isOnSlope;
-    player->m_wasOnSlope = wasOnSlope;
-    player->m_lastJumpTime = lastJumpTime;
-    player->m_lastLandTime = lastLandTime;
-    player->m_lastFlipTime = lastFlipTime;
-    player->m_lastSpiderFlipTime = lastSpiderFlipTime;
-    player->m_totalTime = totalTime;
-    player->m_jumpBuffered = jumpBuffered;
-    player->m_stateRingJump = stateRingJump;
-    player->m_wasJumpBuffered = wasJumpBuffered;
-    player->m_wasRobotJump = wasRobotJump;
-    player->m_stateJumpBuffered = stateJumpBuffered;
-    player->m_stateRingJump2 = stateRingJump2;
-    player->m_touchedRing = touchedRing;
-    player->m_touchedCustomRing = touchedCustomRing;
-    player->m_touchedGravityPortal = touchedGravityPortal;
-    player->m_touchedPad = touchedPad;
-    player->m_ringJumpRelated = ringJumpRelated;
-    player->m_padRingRelated = padRingRelated;
-    player->m_hasEverJumped = hasEverJumped;
-    player->m_hasEverHitRing = hasEverHitRing;
-    player->m_fixRobotJump = fixRobotJump;
-    player->m_stateNoAutoJump = stateNoAutoJump;
-    player->m_stateOnGround = stateOnGround;
-    player->m_stateHitHead = stateHitHead;
-    player->m_stateFlipGravity = stateFlipGravity;
-    player->m_stateDartSlide = stateDartSlide;
-    player->m_stateBoostX = stateBoostX;
-    player->m_stateBoostY = stateBoostY;
-    player->m_maybeStateForce2 = stateForce2;
-    player->m_stateScale = stateScale;
-    player->m_stateForce = stateForce;
-    player->m_stateForceVector = stateForceVector;
-    player->m_wasTeleported = wasTeleported;
-    player->m_maybeTouchedBreakableBlock = touchedBreakableBlock;
-    player->m_lastCollisionBottom = lastCollisionBottom;
-    player->m_lastCollisionTop = lastCollisionTop;
-    player->m_lastCollisionLeft = lastCollisionLeft;
-    player->m_lastCollisionRight = lastCollisionRight;
-    player->m_unk50C = previousCollisionBottom;
-    player->m_unk510 = previousCollisionTop;
-    player->m_slopeStartTime = slopeStartTime;
-    player->m_slopeEndTime = slopeEndTime;
-    player->m_maybeSlidingTime = slidingTime;
-    player->m_maybeSlidingStartTime = slidingStartTime;
-    player->m_collidedTopMinY = collidedTopMinY;
-    player->m_collidedBottomMaxY = collidedBottomMaxY;
-    player->m_collidedLeftMaxX = collidedLeftMaxX;
-    player->m_collidedRightMinX = collidedRightMinX;
-    player->m_isUpsideDown = isUpsideDown;
-    player->m_playerSpeed = playerSpeed;
-    player->m_vehicleSize = vehicleSize;
-    player->m_gravityMod = gravityMod;
-    player->m_isDashing = isDashing;
-    player->m_dashX = dashX;
-    player->m_dashY = dashY;
-    player->m_dashAngle = dashAngle;
-    player->m_dashStartTime = dashStartTime;
-    player->m_dashRing = dashRing;
-    player->m_dashFireFrame = dashFireFrame;
-    player->m_holdingButtons = holdingButtons;
-    player->m_jumpPadRelated = jumpPadRelated;
-    player->m_touchedRings = touchedRings;
+#define AC_APPLY_FIELD(name) player->name = name;
+    AC_PLAYER_FIELDS(AC_APPLY_FIELD)
+#undef AC_APPLY_FIELD
+}
+
+std::string PlayerFix::diff(PlayerFix const& other, size_t limit, size_t* count) const {
+    std::string out;
+    size_t found = 0;
+    auto add = [&](char const* name, std::string const& mine, std::string const& theirs) {
+        found += 1;
+        if (found > limit) return;
+        if (!out.empty()) out += ", ";
+        out += fmt::format("{} {}/{}", name, mine, theirs);
+    };
+    if (!sameValue(nodePosition, other.nodePosition)) {
+        add("node", showValue(nodePosition), showValue(other.nodePosition));
+    }
+#define AC_DIFF_FIELD(name) \
+    if (!sameValue(name, other.name)) add(#name, showValue(name), showValue(other.name));
+    AC_PLAYER_FIELDS(AC_DIFF_FIELD)
+#undef AC_DIFF_FIELD
+    if (count) *count = found;
+    return out;
 }
 
 } // namespace ac

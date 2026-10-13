@@ -96,6 +96,19 @@ struct FakeContext {
     PlayerObject* player = nullptr;
     FakeSim* sim = nullptr;
     bool died = false;
+    GameObject* killer = nullptr;
+};
+
+// Where and by what the hidden player last died (diagnostics).
+struct DeathInfo {
+    bool valid = false;
+    int tick = 0;
+    float x = 0.f;
+    float y = 0.f;
+    int objectId = 0;
+    int objectType = -1;
+    float objectX = 0.f;
+    float objectY = 0.f;
 };
 
 FakeContext& fakeContext();
@@ -121,8 +134,12 @@ private:
 // "already used" flags of orbs and pads it touches are restored afterwards.
 class FakeSim final : public Simulator {
 public:
-    // Copies the real player 1 onto the hidden player; tick 0 is the real game's current tick.
-    FakeSim(PlayLayer* layer, PlayerObject* fake, std::vector<TickOp> ops, double timeStep, PhysicsModel model, bool hold);
+    // Copies the real player 1 (or `from`, a state captured from it earlier) onto the hidden
+    // player; tick 0 is the real game's current tick.
+    FakeSim(
+        PlayLayer* layer, PlayerObject* fake, std::vector<TickOp> ops, double timeStep, PhysicsModel model,
+        bool hold, PlayerFix const* from = nullptr
+    );
     ~FakeSim() override;
 
     FakeSim(FakeSim const&) = delete;
@@ -145,6 +162,10 @@ public:
     // Runs each recorded call once with marker values to see which inlined functions it
     // already contains. Leaves the hidden player as it was.
     InlineProbe probeInlines();
+
+    void captureState(PlayerFix& out) const { out.capture(m_fake); }
+    void setClock(double time) { if (m_fake) m_fake->m_totalTime = time; }
+    DeathInfo const& lastDeath() const { return m_lastDeath; }
 
     long ticksRun() const { return m_ticksRun; }
     double secondsRun() const { return m_secondsRun; }
@@ -191,6 +212,7 @@ private:
     std::vector<Slot> m_slots;
     std::vector<int> m_free;
 
+    DeathInfo m_lastDeath;
     long m_ticksRun = 0;
     double m_secondsRun = 0.0;
 };

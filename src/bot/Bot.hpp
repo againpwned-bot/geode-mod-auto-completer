@@ -32,6 +32,8 @@ struct BotStats {
     int inputDelay = 0;
     std::string model;             // how the hidden player runs GD's inlined per-tick code
     std::string tickCalls;         // physics calls GD makes per tick
+    long shadowTicks = 0;          // real ticks re-simulated one at a time to compare
+    long shadowMismatches = 0;     // of those, ticks where the simulation came out different
     int plannedAhead = 0;          // ticks planned ahead of the player
 };
 
@@ -102,6 +104,9 @@ private:
     void startCalibration(PlayLayer* layer, unsigned now);
     void finishCalibration();
     void closeTick(PlayLayer* layer);
+    void runShadow(PlayLayer* layer);
+    void runSelfTest(PlayLayer* layer);
+    void logDeath(FakeSim const& sim);
     std::unique_ptr<FakeSim> makeSim(PlayLayer* layer, PhysicsModel const& model) const;
     void addSimCost(FakeSim const& sim);
     void setStatus(std::string status);
@@ -133,6 +138,15 @@ private:
     bool m_appliedHold = false;
     unsigned m_tickBefore = 0;
     bool m_tickOpen = false;
+
+    // One-tick check: the real player's state before the tick and the input it got.
+    PlayerFix m_shadowPre;
+    bool m_shadowValid = false;
+    bool m_shadowHeld = false;
+    bool m_shadowWant = false;
+    int m_shadowLogged = 0;
+    int m_selfTests = 0;
+    bool m_selfTestDone = false;
     bool m_usedThisAttempt = false;
     bool m_requestRestart = false;
     uint32_t m_attempt = 0;
