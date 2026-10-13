@@ -35,11 +35,6 @@ class $modify(ACAudioEngine, FMODAudioEngine) {
         return FMODAudioEngine::playEffect(path, speed, unknown, volume);
     }
 
-    int playEffectAsync(gd::string path) {
-        if (muted()) return 0;
-        return FMODAudioEngine::playEffectAsync(path);
-    }
-
     int queuePlayEffect(
         gd::string audioFilename, float speed, float unknown, float volume, float pitch,
         bool fastFourierTransform, bool reverb, int start, int end, int fadeIn, int fadeOut,
