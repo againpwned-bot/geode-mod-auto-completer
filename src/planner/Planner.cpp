@@ -30,7 +30,7 @@ PlannerConfig PlannerConfig::forStyle(PlayStyle style, uint32_t seed) {
         case PlayStyle::Human:
             config.tapLen = 14;
             config.tapLenJitter = 6;
-            config.timingJitter = 0.22;
+            config.timingJitter = 0.15;
             break;
         case PlayStyle::Minimal:
             // Latest safe tick: fewest, latest clicks.
@@ -374,9 +374,32 @@ void Planner::stepFix() {
     fix.next -= std::max(m_cfg.scanStride, 1);
 
     bool const current = tick < static_cast<int>(m_bits.size()) && m_bits[tick];
+    if (!current && !this->canPressAt(tick)) {
+        return;
+    }
     Decision decision = this->makeDecision(!current);
     int survival = this->evaluate(tick, decision, fix.deathTick);
     this->note(TraceEntry::Kind::Eval, tick, survival);
+
+    if (survival >= m_cfg.horizonMin && m_cfg.robust) {
+        // The same click a tick early or late must work too, so a small timing error in
+        // the real game can't kill, and the next obstacle keeps some room.
+        for (int neighbour : { tick - 1, tick + 1 }) {
+            if (neighbour < fix.lo || neighbour > fix.deathTick) {
+                survival = -1;
+                break;
+            }
+            bool const held = neighbour < static_cast<int>(m_bits.size()) && m_bits[neighbour];
+            if (held == current) {
+                Decision shifted = decision;
+                int const s = this->evaluate(neighbour, shifted, fix.deathTick);
+                if (s < m_cfg.horizonMin) {
+                    survival = -1;
+                    break;
+                }
+            }
+        }
+    }
 
     if (survival >= m_cfg.horizonMin) {
         fix.valid.push_back(Candidate{ tick, decision, survival });
@@ -388,6 +411,17 @@ void Planner::stepFix() {
     else if (fix.firstValid >= 0) {
         fix.invalidStreak += 1;
     }
+}
+
+bool Planner::canPressAt(int tick) const {
+    int const start = m_snaps.empty() ? 0 : m_snaps.begin()->first;
+    if (tick <= start || tick - 1 >= static_cast<int>(m_samples.size())) return true;
+
+    Sample const& before = m_samples[tick - 1];
+    bool const groundOnly = before.mode == Mode::Cube || before.mode == Mode::Robot ||
+        before.mode == Mode::Ball || before.mode == Mode::Spider;
+    if (!groundOnly || before.grounded || before.ring) return true;
+    return tick < static_cast<int>(m_samples.size()) && m_samples[tick].ring;
 }
 
 int Planner::evaluate(int tick, Decision const& decision, int deathTick) {
@@ -432,26 +466,48 @@ void Planner::finishFix() {
         best = std::max(best, capped(c));
     }
 
+    // Every candidate that clears the obstacle comfortably is equally good; preferring
+    // the one that survives longest would favour the edge of the window.
+    int const clear = std::min(best, std::max(m_cfg.clearTicks, m_cfg.horizonMin));
     std::vector<Candidate> top;
     std::vector<Candidate> rest;
     for (auto const& c : valid) {
-        (capped(c) >= best ? top : rest).push_back(c);
+        (capped(c) >= clear ? top : rest).push_back(c);
     }
 
-    int early = top.front().tick;
-    int late = top.front().tick;
-    for (auto const& c : top) {
-        early = std::min(early, c.tick);
-        late = std::max(late, c.tick);
+    // The window is the longest unbroken run of good ticks (the latest one for Minimal).
+    std::vector<int> ticks;
+    for (auto const& c : top) ticks.push_back(c.tick);
+    std::sort(ticks.begin(), ticks.end());
+    int const gap = std::max(m_cfg.scanStride, 1);
+    int early = ticks.front();
+    int late = ticks.front();
+    int runStart = ticks.front();
+    for (size_t i = 1; i <= ticks.size(); ++i) {
+        bool const broken = i == ticks.size() || ticks[i] - ticks[i - 1] > gap;
+        if (!broken) continue;
+        int const runEnd = ticks[i - 1];
+        bool const longer = runEnd - runStart > late - early;
+        bool const sameLater = runEnd - runStart == late - early && m_cfg.style == PlayStyle::Minimal;
+        if (longer || sameLater) {
+            early = runStart;
+            late = runEnd;
+        }
+        if (i < ticks.size()) runStart = ticks[i];
     }
 
+    // Stay a few ticks inside the window so a tick of input or physics error can't turn
+    // a safe click into a death.
+    double const margin = std::min(static_cast<double>(std::max(m_cfg.safetyMargin, 0)), (late - early) / 2.0);
+    double const lo = early + margin;
+    double const hi = late - margin;
     double target = (early + late) / 2.0;
     if (m_cfg.style == PlayStyle::Minimal) {
-        target = late;
+        target = hi;
     }
     else if (m_cfg.timingJitter > 0.0 && late > early) {
         std::normal_distribution<double> dist(0.0, m_cfg.timingJitter * (late - early));
-        target = std::clamp(target + dist(m_rng), static_cast<double>(early), static_cast<double>(late));
+        target = std::clamp(target + dist(m_rng), lo, hi);
     }
 
     auto byTarget = [target](Candidate const& a, Candidate const& b) {

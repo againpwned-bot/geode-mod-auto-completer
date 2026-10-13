@@ -43,6 +43,8 @@ struct Sample {
     float y = 0.f;
     bool hold = false;
     Mode mode = Mode::Cube;
+    bool grounded = false; // standing on something after this tick
+    bool ring = false;     // overlapping an orb during this tick
 };
 
 // input(tick, mode) -> whether the jump button should be held during that tick
@@ -85,6 +87,9 @@ struct PlannerConfig {
     int lockTicks = 2400;      // decisions further back than this are never revisited
     int regionBudget = 4000;   // fix evaluations allowed without progress before giving up
     int goalTicks = 0;         // > 0: done once this many ticks are planned (look-ahead mode)
+    int safetyMargin = 3;      // ticks kept away from the edges of a safe timing window
+    int clearTicks = 30;       // surviving this long past the old death counts as fully clear
+    bool robust = false;       // a click only counts if one tick earlier and later also work
     uint32_t seed = 0;
 
     static PlannerConfig forStyle(PlayStyle style, uint32_t seed);
@@ -235,6 +240,10 @@ private:
     int m_regionEvals = 0;
     int m_totalEvals = 0;
     std::vector<TraceEntry> m_trace;
+    // Whether a press at `tick` can do anything: in cube, robot, ball and spider a press
+    // only acts on the ground or on an orb, and a press in the air would just be a
+    // buffered input whose effect depends on exact timing.
+    bool canPressAt(int tick) const;
     void note(TraceEntry::Kind kind, int a, int b = 0) {
         if (m_trace.size() < 600) m_trace.push_back(TraceEntry{ kind, a, b });
     }

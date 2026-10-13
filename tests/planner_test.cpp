@@ -107,7 +107,10 @@ public:
             bool const held = input(t, mode);
             Event ev = this->stepOnce(held);
             m_ticks += 1;
-            sample(t, Sample{ m_state.x, m_state.y, held, mode });
+            Sample smp{ m_state.x, m_state.y, held, mode };
+            smp.grounded = m_state.onGround;
+            smp.ring = m_ring;
+            sample(t, smp);
             if (ev != Event::None) {
                 result.event = ev;
                 result.eventTick = t;
@@ -147,6 +150,11 @@ private:
 
     Event stepOnce(bool held) {
         State& s = m_state;
+        m_ring = false;
+        for (size_t i = 0; i < m_level.objects.size(); ++i) {
+            auto const& o = m_level.objects[i];
+            if (o.kind == Kind::Orb && !s.usedOrbs[i] && o.rect.overlaps(this->playerRect())) m_ring = true;
+        }
         s.prevHeld = s.held;
         s.held = held;
         bool const pressed = held && !s.prevHeld;
@@ -236,6 +244,7 @@ private:
     }
 
     Level const& m_level;
+    bool m_ring = false;
     float m_noise = 0.f;
     State m_state;
     std::vector<State> m_snaps;

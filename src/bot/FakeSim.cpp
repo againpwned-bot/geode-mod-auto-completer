@@ -466,6 +466,8 @@ RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& samp
         s.y = m_fake->getPositionY();
         s.hold = want;
         s.mode = mode;
+        s.grounded = m_fake->m_isOnGround;
+        s.ring = m_fake->m_touchedRing || (m_fake->m_touchingRings && m_fake->m_touchingRings->count() > 0);
         sample(m_tick, s);
 
         int const tick = m_tick;

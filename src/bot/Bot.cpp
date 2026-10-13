@@ -271,10 +271,12 @@ void Bot::onFrame(PlayLayer* layer) {
             status = m_check->planner->step();
         } while (status == Planner::Status::Running && std::chrono::steady_clock::now() < deadline);
 
-        if (status == Planner::Status::Stuck && m_check->seeded && !m_check->retried) {
-            // The search can only move the previous plan's jumps earlier. Before giving
-            // up, plan this stretch again from scratch.
-            this->retryCheck();
+        bool const freshPlan = status == Planner::Status::Stuck && m_check->seeded && !m_check->retried;
+        bool const exactPlan = status == Planner::Status::Stuck && !freshPlan && m_check->config.robust;
+        if (freshPlan || exactPlan) {
+            // The search can only move the previous plan's jumps earlier, so first plan this
+            // stretch again from scratch; if even that needs frame-perfect timing, allow it.
+            this->retryCheck(!exactPlan);
             m_check->sim->endSlice();
         }
         else if (status != Planner::Status::Running) {
@@ -315,6 +317,7 @@ void Bot::startCheck(PlayLayer* layer, unsigned now) {
         (m_attempt * 7919u) ^ (now * 40503u);
     PlannerConfig config = PlannerConfig::forStyle(settings::playStyle(), seedValue);
     config.goalTicks = kHorizon;
+    config.robust = true;
     check->config = config;
     check->planner = std::make_unique<Planner>(*check->sim, config, m_appliedHold, std::move(seed), kFloor);
 
@@ -325,14 +328,17 @@ void Bot::startCheck(PlayLayer* layer, unsigned now) {
     m_stats.checks += 1;
 }
 
-void Bot::retryCheck() {
+void Bot::retryCheck(bool robust) {
     auto& check = *m_check;
     if (m_tracesLogged < 6) {
         m_tracesLogged += 1;
-        log::info("Plan from tick {} stuck while following the previous plan; planning again from scratch", check.t0);
+        log::info(
+            "Plan from tick {} stuck ({}); planning again from scratch{}", check.t0,
+            check.retried ? "fresh plan" : "following the previous plan", robust ? "" : " allowing exact timings"
+        );
         this->logTrace(*check.planner, check.t0);
     }
-    this->diagnoseStuck(check);
+    if (!check.retried) this->diagnoseStuck(check);
     m_stats.evaluations += check.planner->evaluations();
 
     // Back to the state the check started from, then forget the old planner (its
@@ -342,6 +348,7 @@ void Bot::retryCheck() {
 
     // Only the fixed part (the floor) of the previous plan is kept.
     std::vector<uint8_t> seed(check.seed.begin(), check.seed.begin() + std::min<size_t>(kFloor, check.seed.size()));
+    check.config.robust = robust;
     check.planner = std::make_unique<Planner>(*check.sim, check.config, check.initialHold, std::move(seed), kFloor);
     check.retried = true;
 }

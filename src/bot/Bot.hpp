@@ -105,7 +105,7 @@ private:
     void resetAttempt();
     void releaseHold(PlayLayer* layer);
     void startCheck(PlayLayer* layer, unsigned now);
-    void retryCheck();
+    void retryCheck(bool robust);
     void finishCheck();
     void logTrace(Planner const& planner, unsigned t0);
     void diagnoseStuck(Check& check);
