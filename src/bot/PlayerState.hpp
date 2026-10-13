@@ -28,7 +28,7 @@ Mode modeOf(PlayerObject* player);
     X(m_unk510) X(m_currentSlope2) X(m_preLastGroundObject) X(m_slopeAngle) \
     X(m_slopeSlidingMaybeRotated) X(m_collidedObject) X(m_lastGroundObject) X(m_collidingWithLeft) \
     X(m_collidingWithRight) X(m_scaleXRelated2) X(m_groundYVelocity) X(m_yVelocityRelated) \
-    X(m_scaleXRelated3) X(m_collidingBetweenSteps) X(m_scaleXRelated4) X(m_scaleXRelated5) \
+    X(m_scaleXRelated3) X(m_scaleXRelated4) X(m_scaleXRelated5) \
     X(m_isCollidingWithSlope) X(m_isBallRotating) X(m_unk669) X(m_currentPotentialSlope) \
     X(m_currentSlope) X(m_collidingWithSlopeId) X(m_slopeFlipGravityRelated) X(m_slopeAngleRadians) \
     X(m_rotateObjectsRelated) X(m_potentialSlopeMap) X(m_rotationSpeed) X(m_rotateSpeed) \
