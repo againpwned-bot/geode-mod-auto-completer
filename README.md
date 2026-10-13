@@ -2,8 +2,12 @@
 
 A pathfinding bot for **Geometry Dash 2.2081** on **Geode v5**. It plans a safe route through a level with the game's own physics, then plays it automatically. It has play styles, a path viewer and a Mega Hack style ImGui menu (**Tab**).
 
+## Modes
+- **Live mode (default):** the game runs at normal speed. Every frame the bot spends a few milliseconds planning 2 to 4 seconds ahead of the player and presses the jump button for you. The music and sound effects are not touched while it looks ahead.
+- **Precompute mode** (turn Live Mode off): the bot plans the whole level first while the game is frozen, then plays it.
+
 ## How it works
-1. When a level starts, the bot freezes the game and plans. It runs the real game forward tick by tick (240 ticks/s) using GD's checkpoint system to rewind.
+1. In precompute mode the bot freezes the game and plans first; in live mode it does the same search in small slices while you play. It runs the real game forward tick by tick (240 ticks/s) using GD's checkpoint system to rewind.
 2. With nobody pressing anything, the player eventually dies at some tick. The planner then looks back from that tick for every tick where flipping the input avoids the death. Those ticks form a safe timing window.
 3. The play style picks a tick inside the window:
    - **Default**: middle of the window.

@@ -24,6 +24,19 @@ bool& botInputFlag() {
     return flag;
 }
 
+bool& audioStateFrozen() {
+    static bool flag = false;
+    return flag;
+}
+
+namespace {
+    struct AudioFreeze {
+        bool previous;
+        AudioFreeze() : previous(audioStateFrozen()) { audioStateFrozen() = true; }
+        ~AudioFreeze() { audioStateFrozen() = previous; }
+    };
+}
+
 void applyJump(GJBaseGameLayer* layer, bool down) {
     if (!layer) return;
     auto& flag = botInputFlag();
@@ -155,11 +168,7 @@ void PlayerFix::apply(PlayerObject* player) const {
 }
 
 GameSim::GameSim(PlayLayer* layer, bool appliedHold)
-    : m_layer(layer),
-      m_base(layer->m_gameState.m_currentProgress),
-      m_hold(appliedHold),
-      m_endAnimationStarted(layer->m_levelEndAnimationStarted),
-      m_endChecked(layer->m_endChecked) {}
+    : m_layer(layer), m_base(layer->m_gameState.m_currentProgress), m_hold(appliedHold) {}
 
 GameSim::~GameSim() {
     for (auto& slot : m_slots) {
@@ -174,6 +183,7 @@ int GameSim::tick() const {
 }
 
 int GameSim::save() {
+    AudioFreeze freeze;
     bool const practice = m_layer->m_isPracticeMode;
     if (m_practiceWrap) m_layer->m_isPracticeMode = true;
     CheckpointObject* checkpoint = m_layer->createCheckpoint();
@@ -187,6 +197,8 @@ int GameSim::save() {
     slot.player2.capture(m_layer->m_player2);
     slot.hold = m_hold;
     slot.progress = m_layer->m_gameState.m_currentProgress;
+    slot.endAnimationStarted = m_layer->m_levelEndAnimationStarted;
+    slot.endChecked = m_layer->m_endChecked;
     slot.used = true;
 
     int handle;
@@ -208,6 +220,7 @@ void GameSim::load(int handle) {
     auto const& slot = m_slots[handle];
     if (!slot.used || !slot.checkpoint) return;
 
+    AudioFreeze freeze;
     bool const practice = m_layer->m_isPracticeMode;
     if (m_practiceWrap) m_layer->m_isPracticeMode = true;
     m_layer->loadFromCheckpoint(slot.checkpoint);
@@ -215,8 +228,8 @@ void GameSim::load(int handle) {
     slot.player1.apply(m_layer->m_player1);
     slot.player2.apply(m_layer->m_player2);
     m_layer->m_gameState.m_currentProgress = slot.progress;
-    m_layer->m_levelEndAnimationStarted = m_endAnimationStarted;
-    m_layer->m_endChecked = m_endChecked;
+    m_layer->m_levelEndAnimationStarted = slot.endAnimationStarted;
+    m_layer->m_endChecked = slot.endChecked;
     m_hold = slot.hold;
 }
 
@@ -243,7 +256,11 @@ RunResult GameSim::run(int untilTick, InputFn const& input, SampleFn const& samp
 
     RunResult result;
     int stalls = 0;
+    float scale = 1.02f;
     float const levelEnd = m_layer->m_levelLength;
+    // GD keeps the leftover frame time here; planning in the middle of a real frame must
+    // give it back untouched.
+    double const savedExtraDelta = m_layer->m_extraDelta;
 
     while (true) {
         int const before = this->tick();
@@ -251,7 +268,9 @@ RunResult GameSim::run(int untilTick, InputFn const& input, SampleFn const& samp
 
         ctx.currentTick = before;
         m_layer->m_extraDelta = 0.0;
-        m_layer->update(kTickDt);
+        // Slightly more than one step of time, so rounding can never make the game skip
+        // the step. If it still doesn't advance, ask for a little more each time.
+        m_layer->update(kTickDt * scale);
 
         if (ctx.died) {
             result.event = Event::Died;
@@ -265,6 +284,7 @@ RunResult GameSim::run(int untilTick, InputFn const& input, SampleFn const& samp
         }
 
         if (this->tick() == before) {
+            scale = std::min(scale * 1.5f, 8.f);
             if (++stalls > kMaxStalls) {
                 // The game refuses to advance (paused, ended, ...). Treat as a dead end.
                 result.event = Event::Died;
@@ -279,6 +299,7 @@ RunResult GameSim::run(int untilTick, InputFn const& input, SampleFn const& samp
 
     m_hold = ctx.appliedHold;
     ctx = SimContext{};
+    m_layer->m_extraDelta = savedExtraDelta;
     result.endTick = this->tick();
     return result;
 }

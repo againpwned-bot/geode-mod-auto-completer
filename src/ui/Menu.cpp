@@ -40,6 +40,7 @@ float uiScale() {
 
 ImVec4 stateColor(BotState state) {
     switch (state) {
+        case BotState::Live:
         case BotState::Playing:
         case BotState::Finished: return kGood;
         case BotState::Waiting:
@@ -149,6 +150,10 @@ void drawBotWindow(Bot& bot) {
         if (bot.state() == BotState::Computing) {
             ImGui::ProgressBar(bot.computeProgress(), ImVec2(-FLT_MIN, 0.f), "planning");
         }
+        else if (bot.state() == BotState::Live) {
+            auto label = fmt::format("{:.1f} s ahead", bot.liveLeadSeconds());
+            ImGui::ProgressBar(std::min(bot.liveLeadSeconds() / 4.f, 1.f), ImVec2(-FLT_MIN, 0.f), label.c_str());
+        }
         else if (bot.hasPlan()) {
             auto label = fmt::format("path {:.0f}%", bot.planProgress() * 100.f);
             ImGui::ProgressBar(bot.planProgress(), ImVec2(-FLT_MIN, 0.f), label.c_str());
@@ -221,11 +226,18 @@ void drawPathWindow() {
 void drawSettingsWindow() {
     if (beginColumn("Settings", 3)) {
         settingSwitch("Ignore inputs", "ignore-inputs", "Block your own clicks while the bot is playing.");
+        settingSwitch("Live mode", "live-mode", "Play normally while the bot plans a few seconds ahead every frame. Off: plan the whole level first (the game freezes while it plans).");
         settingSwitch("Auto correct", "auto-correct", "If the real run drifts from the plan, re-plan from that point.");
         settingSwitch("Status HUD", "show-hud", "Small status line in the corner while in a level.");
         ImGui::Spacing();
-        settingSliderInt("Compute budget", "compute-budget", 5, 200, "%d ms / frame",
-            "Time spent planning per frame. Higher plans faster but the game updates less often while planning.");
+        if (settings::liveMode()) {
+            settingSliderInt("Live budget", "live-budget", 1, 30, "%d ms / frame",
+                "Planning time per frame in Live mode. Higher plans further ahead but can lower your frame rate.");
+        }
+        else {
+            settingSliderInt("Compute budget", "compute-budget", 5, 200, "%d ms / frame",
+                "Time spent planning per frame while computing the whole path. Higher plans faster.");
+        }
         ImGui::Spacing();
         sectionLabel("Menu key: Geode > Auto Completer settings");
     }
@@ -303,6 +315,10 @@ void drawHud(Bot& bot) {
         ImGui::TextUnformatted(settings::styleName(settings::playStyle()));
         ImGui::SameLine();
         ImGui::TextColored(stateColor(bot.state()), "%s", bot.stateName());
+        if (bot.state() == BotState::Live) {
+            ImGui::SameLine();
+            ImGui::TextColored(kMuted, "%.1fs ahead", bot.liveLeadSeconds());
+        }
         if (bot.safeModeActive()) {
             ImGui::SameLine();
             ImGui::TextColored(kMuted, "| safe mode");

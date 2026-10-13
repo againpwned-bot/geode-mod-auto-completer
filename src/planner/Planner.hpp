@@ -16,6 +16,7 @@
 //   4. If nothing in the window works, backtrack to the previous decision and try its
 //      next best alternative (depth first search with a work budget).
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -116,6 +117,15 @@ public:
     std::vector<uint8_t> const& inputs() const { return m_bestBits; }
     std::vector<Sample> const& samples() const { return m_bestSamples; }
 
+    // Input bits and player samples along the path currently being extended. Valid for
+    // ticks < frontier(). Unlike inputs(), this can shrink again when the planner backtracks.
+    std::vector<uint8_t> const& pathInputs() const { return m_bits; }
+    std::vector<Sample> const& pathSamples() const { return m_samples; }
+
+    // Live use: ticks before `tick` have already been played for real, so decisions
+    // there are final and the planner will never change them.
+    void setFloor(int tick) { m_floor = std::max(m_floor, tick); }
+
     // Snapshot handle of the starting state; owned by the planner until it is destroyed.
     int startHandle() const;
 
@@ -208,6 +218,7 @@ private:
     int m_regionEvals = 0;
     int m_totalEvals = 0;
     int m_startHandle = -1;
+    int m_floor = 0;
 
     // The simulator is positioned at m_cursorTick following the current plan.
     bool m_cursorValid = false;

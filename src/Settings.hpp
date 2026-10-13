@@ -44,6 +44,8 @@ inline double pathLookahead() { return getFloat("path-lookahead"); }
 inline double pathThickness() { return getFloat("path-thickness"); }
 inline bool showHud() { return getBool("show-hud"); }
 inline int64_t computeBudget() { return getInt("compute-budget"); }
+inline bool liveMode() { return getBool("live-mode"); }
+inline int64_t liveBudget() { return getInt("live-budget"); }
 
 inline char const* styleName(PlayStyle style) {
     switch (style) {

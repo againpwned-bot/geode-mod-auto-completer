@@ -3,6 +3,7 @@
 #include "../Settings.hpp"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 
 using namespace geode::prelude;
@@ -15,6 +16,13 @@ namespace {
     constexpr float kDivergenceTolerance = 2.f;
     constexpr int kSelfTestTicks = 240;
     constexpr float kExactRestore = 0.01f;
+
+    // Live mode, in physics ticks (240 per second).
+    constexpr int kLiveMinLead = 60;    // never let the player run closer than this to the end of the plan
+    constexpr int kLiveLow = 480;       // start planning again when the lead drops below this
+    constexpr int kLiveHigh = 960;      // keep planning until the lead reaches this
+    constexpr int kLiveSnapshotInterval = 32;
+    constexpr int kMaxLiveReplans = 30;
 
     float progressOf(PlayLayer* layer, float x) {
         if (!layer || layer->m_levelLength <= 0.f) return 0.f;
@@ -36,12 +44,31 @@ char const* Bot::stateName() const {
         case BotState::Off: return "Off";
         case BotState::Waiting: return "Waiting";
         case BotState::Computing: return "Computing";
+        case BotState::Live: return "Live";
         case BotState::Playing: return "Playing";
         case BotState::Finished: return "Finished";
         case BotState::Failed: return "Failed";
         case BotState::Unsupported: return "Unsupported";
     }
     return "?";
+}
+
+std::string Bot::statusText() const {
+    if (m_state == BotState::Live && m_planner) {
+        if (m_planner->status() == Planner::Status::Running) {
+            return fmt::format("Planning {:.1f}s ahead", this->liveLeadSeconds());
+        }
+        if (m_planner->status() == Planner::Status::Completed) {
+            return "Path found all the way to the end";
+        }
+        return fmt::format("No safe path past {}; playing on", percent(m_planProgress));
+    }
+    return m_status;
+}
+
+float Bot::liveLeadSeconds() const {
+    if (!m_planner || !m_sim) return 0.f;
+    return std::max(0, m_planner->frontier() - m_sim->tick()) / 240.f;
 }
 
 unsigned Bot::currentTick() const {
@@ -87,19 +114,20 @@ bool Bot::readyToCompute(PlayLayer* layer) const {
 bool Bot::shouldBlockUserInput() const {
     if (m_state == BotState::Computing) return true;
     if (!settings::enabled() || !settings::ignoreInputs()) return false;
-    return m_state == BotState::Playing || m_state == BotState::Waiting;
+    return m_state == BotState::Playing || m_state == BotState::Waiting || m_state == BotState::Live;
 }
 
 bool Bot::safeModeActive() const {
     if (m_usedThisAttempt) return true;
     if (!m_layer || !settings::enabled()) return false;
-    return m_state == BotState::Waiting || m_state == BotState::Computing ||
+    return m_state == BotState::Waiting || m_state == BotState::Computing || m_state == BotState::Live ||
         m_state == BotState::Playing || m_state == BotState::Finished || m_state == BotState::Failed;
 }
 
 void Bot::requestRecompute() {
     this->invalidatePlan();
     m_failures = 0;
+    m_selfTested = false;
     m_stats = BotStats{};
     if (m_layer) {
         m_requestRestart = true;
@@ -158,6 +186,7 @@ void Bot::onLevelInit(PlayLayer* layer) {
     this->invalidatePlan();
     m_stats = BotStats{};
     m_practiceWrap = false;
+    m_selfTested = false;
     m_failures = 0;
     m_replans = 0;
     m_seedSalt = 0;
@@ -197,6 +226,10 @@ void Bot::onReset(PlayLayer* layer) {
         // The level was restarted by the player mid-plan; the game already reset itself.
         this->cancelCompute(false);
     }
+    if (m_state == BotState::Live) {
+        this->stopLive();
+    }
+    m_stats.clicks = 0;
 
     m_usedThisAttempt = false;
     m_divergence = false;
@@ -227,6 +260,12 @@ void Bot::onReset(PlayLayer* layer) {
         m_state = BotState::Failed;
         return;
     }
+    if (settings::liveMode()) {
+        this->invalidatePlan();
+        m_state = BotState::Waiting;
+        this->setStatus("Waiting for the level to start");
+        return;
+    }
     if (m_planValid && m_planStyle == settings::playStyle()) {
         m_state = BotState::Playing;
         this->setStatus(m_planComplete ? "Playing" : fmt::format("Playing (path only reaches {})", percent(m_planProgress)));
@@ -243,6 +282,7 @@ bool Bot::onFrame(PlayLayer* layer, float) {
 
     if (!settings::enabled()) {
         if (m_state == BotState::Computing) this->cancelCompute(true);
+        if (m_state == BotState::Live) this->stopLive();
         if (m_state != BotState::Off) {
             if (m_appliedHold) {
                 applyJump(layer, false);
@@ -256,6 +296,7 @@ bool Bot::onFrame(PlayLayer* layer, float) {
 
     if (layer->m_isPracticeMode) {
         if (m_state == BotState::Computing) this->cancelCompute(true);
+        if (m_state == BotState::Live) this->stopLive();
         if (m_state != BotState::Off) {
             m_state = BotState::Off;
             this->setStatus("Paused in practice mode");
@@ -277,6 +318,7 @@ bool Bot::onFrame(PlayLayer* layer, float) {
     if (m_requestRestart) {
         m_requestRestart = false;
         if (m_state == BotState::Computing) this->cancelCompute(true);
+        if (m_state == BotState::Live) this->stopLive();
         layer->resetLevel();
         return true;
     }
@@ -284,6 +326,10 @@ bool Bot::onFrame(PlayLayer* layer, float) {
     switch (m_state) {
         case BotState::Waiting:
             if (!this->readyToCompute(layer)) return false;
+            if (settings::liveMode()) {
+                this->startLive(layer);
+                return m_state == BotState::Live ? this->liveFrame(layer) : false;
+            }
             this->startCompute(layer, layer->m_gameState.m_currentProgress != 0);
             if (m_state == BotState::Computing) this->runCompute(layer);
             return true;
@@ -291,6 +337,16 @@ bool Bot::onFrame(PlayLayer* layer, float) {
         case BotState::Computing:
             this->runCompute(layer);
             return true;
+
+        case BotState::Live:
+            if (m_divergence && settings::autoCorrect() && m_replans < kMaxLiveReplans && this->readyToCompute(layer)) {
+                m_divergence = false;
+                m_replans += 1;
+                this->stopLive();
+                this->startLive(layer);
+                if (m_state != BotState::Live) return false;
+            }
+            return this->liveFrame(layer);
 
         case BotState::Playing:
             if (m_divergence && settings::autoCorrect() && m_replans < kMaxReplans && this->readyToCompute(layer)) {
@@ -309,6 +365,33 @@ bool Bot::onFrame(PlayLayer* layer, float) {
 
 void Bot::afterFrame(PlayLayer*) {}
 
+void Bot::runSelfTest(PlayLayer*) {
+    // Check once per level that checkpoints restore the game exactly. If they don't,
+    // see whether practice style checkpoints do better and keep whichever is closer.
+    m_selfTested = true;
+    float deviation = m_sim->selfTest(kSelfTestTicks);
+    if (deviation > kExactRestore || deviation < 0.f) {
+        m_sim->setPracticeWrap(true);
+        float const wrapped = m_sim->selfTest(kSelfTestTicks);
+        log::info("Checkpoint self test: normal {:.4f}, practice style {:.4f}", deviation, wrapped);
+        if (wrapped >= 0.f && (deviation < 0.f || wrapped < deviation)) {
+            deviation = wrapped;
+            m_practiceWrap = true;
+        }
+        else {
+            m_sim->setPracticeWrap(false);
+        }
+    }
+    m_stats.selfTestDeviation = deviation;
+    if (deviation > kExactRestore) {
+        log::warn("Checkpoint restores are off by up to {:.3f} units; relying on auto correct", deviation);
+    }
+    else {
+        log::info("Checkpoint self test passed (deviation {:.4f})", deviation);
+    }
+    m_sim->setPracticeWrap(m_practiceWrap);
+}
+
 void Bot::startCompute(PlayLayer* layer, bool replan) {
     m_replanning = replan;
     m_computeStart = layer->m_gameState.m_currentProgress;
@@ -317,29 +400,8 @@ void Bot::startCompute(PlayLayer* layer, bool replan) {
     bool const hold = replan ? m_appliedHold : false;
     m_sim = std::make_unique<GameSim>(layer, hold);
 
-    if (!replan && m_stats.selfTestDeviation < 0.f) {
-        // Check once per level that checkpoints restore the game exactly. If they don't,
-        // see whether practice style checkpoints do better and keep whichever is closer.
-        float deviation = m_sim->selfTest(kSelfTestTicks);
-        if (deviation > kExactRestore || deviation < 0.f) {
-            m_sim->setPracticeWrap(true);
-            float const wrapped = m_sim->selfTest(kSelfTestTicks);
-            log::info("Checkpoint self test: normal {:.4f}, practice style {:.4f}", deviation, wrapped);
-            if (wrapped >= 0.f && (deviation < 0.f || wrapped < deviation)) {
-                deviation = wrapped;
-                m_practiceWrap = true;
-            }
-            else {
-                m_sim->setPracticeWrap(false);
-            }
-        }
-        m_stats.selfTestDeviation = deviation;
-        if (deviation > kExactRestore) {
-            log::warn("Checkpoint restores are off by up to {:.3f} units; relying on auto correct", deviation);
-        }
-        else {
-            log::info("Checkpoint self test passed (deviation {:.4f})", deviation);
-        }
+    if (!replan && !m_selfTested) {
+        this->runSelfTest(layer);
     }
     m_sim->setPracticeWrap(m_practiceWrap);
 
@@ -447,6 +509,137 @@ void Bot::finishCompute(PlayLayer* layer) {
     }
 }
 
+void Bot::startLive(PlayLayer* layer) {
+    bool const hold = m_appliedHold;
+    m_sim = std::make_unique<GameSim>(layer, hold);
+    if (!m_selfTested) {
+        this->runSelfTest(layer);
+    }
+    m_sim->setPracticeWrap(m_practiceWrap);
+
+    m_planStyle = settings::playStyle();
+    uint32_t seed = static_cast<uint32_t>(layer->m_level->m_levelID.value()) * 2654435761u;
+    seed ^= m_seedSalt + layer->m_gameState.m_currentProgress * 40503u;
+
+    PlannerConfig config = PlannerConfig::forStyle(m_planStyle, seed);
+    config.snapshotInterval = kLiveSnapshotInterval;
+    m_planner = std::make_unique<Planner>(*m_sim, config, hold);
+    if (m_planner->status() != Planner::Status::Running) {
+        // Checkpoints are unavailable in this level; there is nothing to plan with.
+        this->stopLive();
+        m_state = BotState::Failed;
+        this->setStatus("Could not create checkpoints in this level");
+        return;
+    }
+
+    this->invalidatePlan();
+    m_state = BotState::Live;
+    m_livePlanning = true;
+    m_liveFrames = 0;
+    m_divergence = false;
+    this->setStatus("Live: planning ahead while you play");
+}
+
+void Bot::stopLive() {
+    m_planner.reset();
+    m_sim.reset();
+    m_livePlanning = true;
+}
+
+void Bot::syncLiveView() {
+    if (!m_planner || !m_sim) return;
+
+    auto const& bits = m_planner->pathInputs();
+    auto const& samples = m_planner->pathSamples();
+    int const front = std::min<int>(m_planner->frontier(), static_cast<int>(std::min(bits.size(), samples.size())));
+    int const base = static_cast<int>(m_sim->baseProgress());
+    int const tick = m_sim->tick();
+
+    size_t const need = static_cast<size_t>(base + std::max(front, 0));
+    if (m_inputs.size() < need) {
+        m_inputs.resize(need, 0);
+        m_samples.resize(need);
+    }
+    // Only the part around and ahead of the player is ever drawn, so only that is copied.
+    for (int rel = std::max(0, tick - 64); rel < front; ++rel) {
+        m_inputs[base + rel] = bits[rel];
+        m_samples[base + rel] = samples[rel];
+    }
+
+    m_planBegin = static_cast<unsigned>(base);
+    m_planEnd = base + std::max(front, 0);
+    m_planValid = front > 0;
+    m_planComplete = m_planner->status() == Planner::Status::Completed;
+    m_planRevision += 1;
+    if (m_planEnd > 0 && m_planEnd <= static_cast<int>(m_samples.size())) {
+        m_planProgress = m_planComplete ? 1.f : progressOf(m_layer, m_samples[m_planEnd - 1].x);
+    }
+    m_stats.decisions = m_planner->decisions();
+    m_stats.evaluations = m_planner->evaluations();
+    m_stats.plannedTicks = front;
+    m_stats.complete = m_planComplete;
+}
+
+bool Bot::liveFrame(PlayLayer*) {
+    if (!m_planner || !m_sim) {
+        m_state = BotState::Waiting;
+        return false;
+    }
+
+    auto& planner = *m_planner;
+    int const tick = m_sim->tick();
+    bool changed = false;
+
+    if (planner.status() == Planner::Status::Running) {
+        // Decisions at or before the tick being played now are final.
+        planner.setFloor(tick);
+
+        int lead = planner.frontier() - tick;
+        if (lead < kLiveLow) m_livePlanning = true;
+        if (lead >= kLiveHigh) m_livePlanning = false;
+
+        if (m_livePlanning || lead < kLiveMinLead) {
+            auto const begin = std::chrono::steady_clock::now();
+            auto const budget = std::chrono::milliseconds(std::clamp<int64_t>(settings::liveBudget(), 1, 50));
+            auto const deadline = begin + budget;
+
+            // Simulating moves the real game around, so remember where it is and put it back.
+            int const here = m_sim->save();
+            if (here >= 0) {
+                Planner::Status status;
+                do {
+                    status = planner.step();
+                } while (status == Planner::Status::Running &&
+                         planner.frontier() - tick < kLiveHigh &&
+                         std::chrono::steady_clock::now() < deadline);
+                m_sim->load(here);
+                m_sim->release(here);
+                changed = true;
+            }
+            else {
+                // Checkpoints stopped working mid-level, so nothing more can be planned.
+                this->stopLive();
+                m_state = BotState::Failed;
+                this->setStatus("Checkpoints stopped working; bot stopped");
+                return false;
+            }
+            m_stats.computeSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+        }
+    }
+
+    if (changed || (++m_liveFrames % 30) == 0) {
+        this->syncLiveView();
+    }
+
+    int const lead = planner.frontier() - tick;
+    bool const running = planner.status() == Planner::Status::Running;
+    if (running && lead < kLiveMinLead) {
+        // The plan is too short to play safely; hold the game for a frame so it can catch up.
+        return true;
+    }
+    return false;
+}
+
 void Bot::cancelCompute(bool restore) {
     if (m_planner && m_sim && restore) {
         m_sim->load(m_planner->startHandle());
@@ -465,6 +658,23 @@ void Bot::cancelCompute(bool restore) {
 
 void Bot::beforeTick(PlayLayer* layer) {
     m_tickBefore = layer->m_gameState.m_currentProgress;
+
+    if (m_state == BotState::Live && m_planner && m_sim) {
+        int const rel = static_cast<int>(m_tickBefore) - static_cast<int>(m_sim->baseProgress());
+        auto const& bits = m_planner->pathInputs();
+        bool want = false;
+        if (rel >= 0 && rel < m_planner->frontier() && rel < static_cast<int>(bits.size())) {
+            want = bits[rel] != 0;
+        }
+        if (want != m_appliedHold) {
+            if (want) m_stats.clicks += 1;
+            applyJump(layer, want);
+            m_appliedHold = want;
+        }
+        m_usedThisAttempt = true;
+        return;
+    }
+
     if (m_state != BotState::Playing) return;
 
     bool want = false;
@@ -479,6 +689,22 @@ void Bot::beforeTick(PlayLayer* layer) {
 }
 
 void Bot::afterTick(PlayLayer* layer) {
+    if (m_state == BotState::Live && m_planner && m_sim && !m_divergence && layer->m_player1) {
+        int const rel = static_cast<int>(m_tickBefore) - static_cast<int>(m_sim->baseProgress());
+        auto const& samples = m_planner->pathSamples();
+        if (rel >= 0 && rel < m_planner->frontier() && rel < static_cast<int>(samples.size())) {
+            auto const& expected = samples[rel];
+            auto const actual = layer->m_player1->getPosition();
+            if (std::abs(actual.x - expected.x) > kDivergenceTolerance || std::abs(actual.y - expected.y) > kDivergenceTolerance) {
+                m_divergence = true;
+                log::warn(
+                    "Desync at tick {}: expected ({:.2f}, {:.2f}), got ({:.2f}, {:.2f})",
+                    m_tickBefore, expected.x, expected.y, actual.x, actual.y
+                );
+            }
+        }
+        return;
+    }
     if (m_state != BotState::Playing || m_divergence || !layer->m_player1) return;
 
     unsigned const tick = m_tickBefore;
@@ -496,6 +722,25 @@ void Bot::afterTick(PlayLayer* layer) {
 }
 
 void Bot::onRealDeath(PlayLayer* layer) {
+    if (m_state == BotState::Live) {
+        float const at = progressOf(layer, layer->m_player1 ? layer->m_player1->getPositionX() : 0.f);
+        bool const stuck = m_planner && m_planner->status() == Planner::Status::Stuck;
+        m_appliedHold = false;
+        m_failures += 1;
+        m_seedSalt += 7919;
+        this->stopLive();
+        m_state = BotState::Failed;
+        if (m_failures > kMaxFailures) {
+            this->setStatus(fmt::format("Died at {} again; bot stopped. Try another play style.", percent(at)));
+        }
+        else if (stuck) {
+            this->setStatus(fmt::format("Died at {}: no safe path was found past this point", percent(at)));
+        }
+        else {
+            this->setStatus(fmt::format("Died at {} (the run drifted from the plan), trying again", percent(at)));
+        }
+        return;
+    }
     if (m_state != BotState::Playing) return;
 
     unsigned const tick = layer->m_gameState.m_currentProgress;
@@ -525,7 +770,8 @@ void Bot::onRealDeath(PlayLayer* layer) {
 }
 
 void Bot::onRealComplete(PlayLayer*) {
-    if (m_state != BotState::Playing && !m_usedThisAttempt) return;
+    if (m_state != BotState::Playing && m_state != BotState::Live && !m_usedThisAttempt) return;
+    this->stopLive();
     m_state = BotState::Finished;
     m_failures = 0;
     this->setStatus("Level completed (safe mode: nothing was saved)");

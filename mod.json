@@ -5,10 +5,13 @@
 	},
 	"id": "againpwned.auto-completer",
 	"name": "Auto Completer",
-	"version": "v1.0.0",
+	"version": "v1.1.0",
 	"developer": "againpwned",
 	"description": "Pathfinding bot that beats levels for you, with play styles, a path viewer and a Mega Hack style menu.",
-	"tags": ["gameplay", "utility"],
+	"tags": [
+		"gameplay",
+		"utility"
+	],
 	"resources": {
 		"files": [
 			"resources/Roboto-Medium.ttf"
@@ -30,7 +33,12 @@
 			"name": "Play Style",
 			"description": "<cy>Default</c>: balanced, clicks in the middle of each safe timing window.\n<cg>Perfect</c>: frame precise scan with the widest margins, slower to plan.\n<cb>Human</c>: natural timing spread and tap lengths.\n<co>Minimal</c>: latest safe click, shortest taps.",
 			"default": "Default",
-			"one-of": ["Default", "Perfect", "Human", "Minimal"]
+			"one-of": [
+				"Default",
+				"Perfect",
+				"Human",
+				"Minimal"
+			]
 		},
 		"ignore-inputs": {
 			"type": "bool",
@@ -43,6 +51,25 @@
 			"name": "Auto Correct",
 			"description": "If the real run drifts away from the planned path, plan again from that point.",
 			"default": true
+		},
+		"live-mode": {
+			"type": "bool",
+			"name": "Live Mode",
+			"description": "Play the level normally while the bot plans a few seconds ahead in small slices every frame. Turn it off to plan the whole level first (the game freezes while it plans).",
+			"default": true
+		},
+		"live-budget": {
+			"type": "int",
+			"name": "Live Budget (ms per frame)",
+			"description": "How much time the planner may use each frame in Live Mode. Higher plans further ahead but can lower your frame rate.",
+			"default": 6,
+			"min": 1,
+			"max": 30,
+			"control": {
+				"slider": true,
+				"slider-step": 1,
+				"input": true
+			}
 		},
 		"compute-budget": {
 			"type": "int",

@@ -147,7 +147,7 @@ void Planner::recordSample(int tick, Sample const& sample) {
 }
 
 int Planner::lockTick() const {
-    return std::max(0, m_maxFrontier - m_cfg.lockTicks);
+    return std::max({ 0, m_maxFrontier - m_cfg.lockTicks, m_floor });
 }
 
 int Planner::snapAtOrBefore(int tick) const {

@@ -16,7 +16,8 @@ enum class BotState {
     Off,         // disabled, not in a level, or in practice mode
     Waiting,     // in a level, will compute a path on the next frame
     Computing,   // planning (the game is frozen meanwhile)
-    Playing,     // following the planned path
+    Live,        // playing normally while planning a few seconds ahead in small slices
+    Playing,     // following a fully precomputed path
     Finished,    // the level was completed this attempt
     Failed,      // the player died while following the path
     Unsupported, // level type the bot can't handle
@@ -56,7 +57,9 @@ public:
     // --- menu ---
     BotState state() const { return m_state; }
     char const* stateName() const;
-    std::string const& statusText() const { return m_status; }
+    std::string statusText() const;
+    // How far ahead of the player the live plan currently reaches, in seconds.
+    float liveLeadSeconds() const;
     float computeProgress() const { return m_computeProgress; }
     float planProgress() const { return m_planProgress; }
     BotStats const& stats() const { return m_stats; }
@@ -77,6 +80,11 @@ private:
 
     bool supported(PlayLayer* layer, std::string& reason) const;
     bool readyToCompute(PlayLayer* layer) const;
+    void startLive(PlayLayer* layer);
+    void stopLive();
+    bool liveFrame(PlayLayer* layer);
+    void syncLiveView();
+    void runSelfTest(PlayLayer* layer);
     void startCompute(PlayLayer* layer, bool replan);
     void runCompute(PlayLayer* layer);
     void finishCompute(PlayLayer* layer);
@@ -113,6 +121,11 @@ private:
     unsigned m_planRevision = 0;
     float m_planProgress = 0.f;
     BotStats m_stats;
+
+    // live mode
+    bool m_livePlanning = true; // hysteresis: plan until far enough ahead, then idle
+    int m_liveFrames = 0;
+    bool m_selfTested = false;
 
     // playback
     bool m_appliedHold = false;

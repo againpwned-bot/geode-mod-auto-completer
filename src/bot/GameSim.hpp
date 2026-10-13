@@ -26,6 +26,10 @@ SimContext& simContext();
 // True while the bot itself is calling handleButton, so the input blocker lets it through.
 bool& botInputFlag();
 
+// True while the bot creates or loads checkpoints. The audio engine hooks skip their
+// work then, so rewinding the game never touches (and stutters) the music.
+bool& audioStateFrozen();
+
 // Presses or releases the jump button through the game's normal input path.
 void applyJump(GJBaseGameLayer* layer, bool down);
 
@@ -126,6 +130,8 @@ private:
         PlayerFix player2;
         bool hold = false;
         unsigned progress = 0;
+        bool endAnimationStarted = false;
+        bool endChecked = false;
         bool used = false;
     };
 
@@ -133,9 +139,6 @@ private:
     unsigned m_base = 0;
     bool m_hold = false;
     bool m_practiceWrap = false;
-    // Level end flags from before planning; a simulated finish must not leak into the real run.
-    bool m_endAnimationStarted = false;
-    bool m_endChecked = false;
     int m_live = 0;
     std::vector<Slot> m_slots;
     std::vector<int> m_free;

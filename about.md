@@ -3,6 +3,7 @@
 A pathfinding bot for Geometry Dash. Open a level and it plans a safe route with the game's own physics, then plays it for you. You don't need to touch anything.
 
 ## Features
+- **Live mode**: the game runs normally; the bot plans a few seconds ahead in tiny slices every frame and does the inputs. (Precompute mode is still available.)
 - **Real pathfinding**: the bot rewinds with GD checkpoints and tests jump timings against the level's actual physics, triggers and hitboxes.
 - **Play styles**: *Default*, *Perfect* (frame precise, widest margins), *Legit Human* (natural timing and tap lengths) and *Minimal* (fewest, latest clicks).
 - **Path viewer**: draws the planned route in the level, green while holding and white while released, with markers where each click starts and ends.

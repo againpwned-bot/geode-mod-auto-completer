@@ -409,6 +409,47 @@ int main() {
         if (!ok) failures++;
     }
 
+    // Live use: the "player" advances 4 ticks per frame while the planner stays about a
+    // second ahead, with everything behind the player frozen. The inputs that were actually
+    // played must still beat the level when replayed from scratch.
+    for (auto const& level : levels) {
+        if (level.name == "impossible wall") continue;
+        for (PlayStyle style : styles) {
+            ToySim sim(level);
+            bool ok = true;
+            int player = 0;
+            std::vector<uint8_t> played;
+            {
+                Planner planner(sim, PlannerConfig::forStyle(style, 7), false);
+                bool finished = false;
+                while (!finished && player < 100000) {
+                    planner.setFloor(player);
+                    long steps = 0;
+                    while (planner.status() == Planner::Status::Running && planner.frontier() - player < 240) {
+                        planner.step();
+                        if (++steps > 2000000) break;
+                    }
+                    if (planner.status() == Planner::Status::Stuck) { ok = false; break; }
+                    for (int i = 0; i < 4; ++i) {
+                        auto const& bits = planner.pathInputs();
+                        bool want = player < planner.frontier() && player < static_cast<int>(bits.size()) && bits[player];
+                        played.push_back(want ? 1 : 0);
+                        player += 1;
+                        if (planner.status() == Planner::Status::Completed && player >= planner.endTick()) {
+                            finished = true;
+                            break;
+                        }
+                    }
+                }
+                ok = ok && finished;
+            }
+            if (ok) ok = replay(level, played, player) == Event::Completed;
+            if (sim.liveSnapshots() != 0) ok = false;
+            std::printf("live %-24s %-8s %s\n", level.name.c_str(), styleName(style), ok ? "ok" : "FAILED");
+            if (!ok) failures++;
+        }
+    }
+
     std::printf(failures == 0 ? "ALL PASSED\n" : "%d FAILURE(S)\n", failures);
     return failures == 0 ? 0 : 1;
 }
