@@ -1,12 +1,16 @@
 #include <Geode/Geode.hpp>
+#include <Geode/modify/EffectGameObject.hpp>
+#include <Geode/modify/EnhancedGameObject.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
-#include <Geode/modify/HardStreak.hpp>
+#include <Geode/modify/GameObject.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
 
 #include "../bot/Bot.hpp"
-#include "../bot/GameSim.hpp"
+#include "../bot/FakeSim.hpp"
 #include "../ui/PathViewer.hpp"
+
+#include <algorithm>
 
 using namespace geode::prelude;
 
@@ -15,12 +19,52 @@ namespace {
         auto* playLayer = PlayLayer::get();
         return playLayer && static_cast<GJBaseGameLayer*>(playLayer) == layer;
     }
+
+    bool simulating() {
+        return ac::fakeContext().active;
+    }
+
+    bool isHiddenPlayer(PlayerObject* player) {
+        return player && player == ac::FakeWorld::get().player();
+    }
+
+    // What the hidden player collides with: terrain, hazards, orbs and pads. Portals,
+    // triggers, coins and everything else are left to the real game.
+    bool simulatedType(GameObjectType type, bool& activatable) {
+        activatable = false;
+        switch (type) {
+            case GameObjectType::Solid:
+            case GameObjectType::Hazard:
+            case GameObjectType::AnimatedHazard:
+            case GameObjectType::Slope:
+                return true;
+            case GameObjectType::YellowJumpPad:
+            case GameObjectType::PinkJumpPad:
+            case GameObjectType::GravityPad:
+            case GameObjectType::RedJumpPad:
+            case GameObjectType::SpiderPad:
+            case GameObjectType::YellowJumpRing:
+            case GameObjectType::PinkJumpRing:
+            case GameObjectType::GravityRing:
+            case GameObjectType::GreenRing:
+            case GameObjectType::DropRing:
+            case GameObjectType::RedJumpRing:
+            case GameObjectType::CustomRing:
+            case GameObjectType::DashRing:
+            case GameObjectType::GravityDashRing:
+            case GameObjectType::SpiderOrb:
+                activatable = true;
+                return true;
+            default:
+                return false;
+        }
+    }
 }
 
 class $modify(ACPlayLayer, PlayLayer) {
     static void onModify(auto& self) {
-        // Run before noclip style hooks from other mods, so a simulated death is always
-        // seen and the planner never mistakes a deadly path for a safe one.
+        // Run before noclip style hooks from other mods, so the hidden player's deaths are
+        // always seen and the real player's deaths are always counted.
         if (!self.setHookPriorityPre("PlayLayer::destroyPlayer", Priority::First)) {
             log::warn("Failed to set destroyPlayer hook priority");
         }
@@ -31,6 +75,9 @@ class $modify(ACPlayLayer, PlayLayer) {
 
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
+        if (!ac::FakeWorld::get().attach(this)) {
+            log::error("Could not create the hidden simulation player");
+        }
         ac::Bot::get().onLevelInit(this);
         ac::PathViewer::get().attach(this);
         return true;
@@ -39,6 +86,7 @@ class $modify(ACPlayLayer, PlayLayer) {
     void onQuit() {
         ac::Bot::get().onLevelQuit(this);
         ac::PathViewer::get().detach(this);
+        ac::FakeWorld::get().detach(this);
         PlayLayer::onQuit();
     }
 
@@ -46,24 +94,22 @@ class $modify(ACPlayLayer, PlayLayer) {
         // Covers leaving the level without onQuit (e.g. another mod switching scenes).
         ac::Bot::get().onLevelQuit(this);
         ac::PathViewer::get().detach(this);
+        ac::FakeWorld::get().detach(this);
         PlayLayer::onExit();
     }
 
     void resetLevel() {
         PlayLayer::resetLevel();
-        if (ac::simContext().active) return;
         ac::Bot::get().onReset(this);
     }
 
     void destroyPlayer(PlayerObject* player, GameObject* object) {
-        auto& ctx = ac::simContext();
+        auto& ctx = ac::fakeContext();
         if (ctx.active) {
-            if (object != m_anticheatSpike && !ctx.died) {
-                ctx.died = true;
-                ctx.eventTick = ctx.currentTick;
-            }
+            if (player == ctx.player) ctx.died = true;
             return;
         }
+        if (isHiddenPlayer(player)) return;
         if (object == m_anticheatSpike) {
             PlayLayer::destroyPlayer(player, object);
             return;
@@ -83,14 +129,7 @@ class $modify(ACPlayLayer, PlayLayer) {
     }
 
     void levelComplete() {
-        auto& ctx = ac::simContext();
-        if (ctx.active) {
-            if (!ctx.completed) {
-                ctx.completed = true;
-                ctx.eventTick = ctx.currentTick;
-            }
-            return;
-        }
+        if (simulating()) return;
 
         auto& bot = ac::Bot::get();
         bool const testMode = m_isTestMode;
@@ -104,23 +143,8 @@ class $modify(ACPlayLayer, PlayLayer) {
     }
 
     void playEndAnimationToPos(CCPoint position) {
-        auto& ctx = ac::simContext();
-        if (ctx.active) {
-            if (!ctx.completed) {
-                ctx.completed = true;
-                ctx.eventTick = ctx.currentTick;
-            }
-            return;
-        }
+        if (simulating()) return;
         PlayLayer::playEndAnimationToPos(position);
-    }
-
-    void updateVisibility(float dt) {
-        // While simulating every tick is its own update; refresh visibility at the rate a
-        // 60 fps frame would instead of on every tick.
-        auto& ctx = ac::simContext();
-        if (ctx.active && (ctx.currentTick & 3) != 3) return;
-        PlayLayer::updateVisibility(dt);
     }
 };
 
@@ -132,84 +156,156 @@ class $modify(ACBaseGameLayer, GJBaseGameLayer) {
     }
 
     void update(float dt) {
-        if (ac::simContext().active || !isCurrentPlayLayer(this)) {
+        if (simulating() || !isCurrentPlayLayer(this)) {
             GJBaseGameLayer::update(dt);
             return;
         }
-
         auto* playLayer = PlayLayer::get();
-        if (ac::Bot::get().onFrame(playLayer, dt)) {
-            ac::PathViewer::get().update(playLayer);
-            return;
-        }
+        auto& recorder = ac::TickRecorder::get();
+        ac::Bot::get().onFrame(playLayer);
+        recorder.beginFrame(m_player1);
         GJBaseGameLayer::update(dt);
-        ac::Bot::get().afterFrame(playLayer);
+        recorder.endFrame();
         ac::PathViewer::get().update(playLayer);
     }
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-        if (!isCurrentPlayLayer(this)) {
+        if (simulating() || !isCurrentPlayLayer(this)) {
             GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
             return;
         }
-
-        auto& ctx = ac::simContext();
-        if (ctx.active) {
-            int const tick = static_cast<int>(m_gameState.m_currentProgress) - static_cast<int>(ctx.baseProgress);
-            ac::Mode const mode = ac::modeOf(m_player1);
-            bool const want = ctx.input ? (*ctx.input)(tick, mode) : false;
-            if (want != ctx.appliedHold) {
-                ac::applyJump(this, want);
-                ctx.appliedHold = want;
-            }
-            ctx.currentTick = tick;
-
-            GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-
-            if (ctx.sample && m_player1) {
-                ac::Sample sample;
-                sample.x = m_player1->getPositionX();
-                sample.y = m_player1->getPositionY();
-                sample.hold = want;
-                sample.mode = mode;
-                (*ctx.sample)(tick, sample);
-            }
-            return;
-        }
-
         auto* playLayer = PlayLayer::get();
         auto& bot = ac::Bot::get();
+        auto& recorder = ac::TickRecorder::get();
+
         bot.beforeTick(playLayer);
+        recorder.beginTick(m_player1);
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+        recorder.endTick();
         bot.afterTick(playLayer);
     }
 
     void handleButton(bool down, int button, bool isPlayer1) {
-        if (!ac::botInputFlag() && isCurrentPlayLayer(this)) {
-            if (ac::simContext().active || ac::Bot::get().shouldBlockUserInput()) {
-                return;
-            }
+        if (!ac::botInputFlag() && isCurrentPlayLayer(this) && ac::Bot::get().shouldBlockUserInput()) {
+            return;
         }
         GJBaseGameLayer::handleButton(down, button, isPlayer1);
     }
 
-    void updateParticles(float dt) {
-        if (ac::simContext().active) return;
-        GJBaseGameLayer::updateParticles(dt);
+    int checkCollisions(PlayerObject* player, float dt, bool ignoreDamage) {
+        auto& recorder = ac::TickRecorder::get();
+        recorder.enter(player, ac::TickOp::Kind::Collide, dt, false);
+        int const result = GJBaseGameLayer::checkCollisions(player, dt, ignoreDamage);
+        recorder.leave();
+        return result;
+    }
+
+    void collisionCheckObjects(PlayerObject* player, gd::vector<GameObject*>* objects, int objectCount, float dt) {
+        auto& ctx = ac::fakeContext();
+        if (!ctx.active || player != ctx.player || !objects) {
+            GJBaseGameLayer::collisionCheckObjects(player, objects, objectCount, dt);
+            return;
+        }
+
+        gd::vector<GameObject*> kept;
+        int const count = std::min<int>(objectCount, static_cast<int>(objects->size()));
+        for (int i = 0; i < count; ++i) {
+            GameObject* object = (*objects)[i];
+            if (!object) continue;
+            bool activatable = false;
+            if (!simulatedType(object->m_objectType, activatable)) continue;
+            if (activatable && ctx.sim) {
+                ctx.sim->noteObject(object);
+            }
+            kept.push_back(object);
+        }
+        GJBaseGameLayer::collisionCheckObjects(player, &kept, static_cast<int>(kept.size()), dt);
+    }
+
+    void flipGravity(PlayerObject* player, bool flip, bool noEffects) {
+        auto& ctx = ac::fakeContext();
+        if (ctx.active && player == ctx.player) {
+            // Only the hidden player flips; no level wide gravity effect.
+            player->flipGravity(flip, true);
+            return;
+        }
+        GJBaseGameLayer::flipGravity(player, flip, noEffects);
+    }
+
+    void gameEventTriggered(GJGameEvent event, int material, int playerID) {
+        if (simulating()) return;
+        GJBaseGameLayer::gameEventTriggered(event, material, playerID);
+    }
+
+    void destroyObject(GameObject* object) {
+        if (simulating()) return;
+        GJBaseGameLayer::destroyObject(object);
+    }
+
+    void pickupItem(EffectGameObject* object) {
+        if (simulating()) return;
+        GJBaseGameLayer::pickupItem(object);
+    }
+
+    void playerTouchedTrigger(PlayerObject* player, EffectGameObject* object) {
+        if (simulating()) return;
+        GJBaseGameLayer::playerTouchedTrigger(player, object);
     }
 };
 
 class $modify(ACPlayerObject, PlayerObject) {
+    void update(float dt) {
+        auto& recorder = ac::TickRecorder::get();
+        recorder.enter(this, ac::TickOp::Kind::Update, dt, false);
+        PlayerObject::update(dt);
+        recorder.leave();
+    }
+
+    void postCollision(float dt, bool betweenSteps) {
+        auto& recorder = ac::TickRecorder::get();
+        recorder.enter(this, ac::TickOp::Kind::Post, dt, betweenSteps);
+        PlayerObject::postCollision(dt, betweenSteps);
+        recorder.leave();
+    }
+
     void incrementJumps() {
-        if (ac::simContext().active || ac::Bot::get().safeModeActive()) return;
+        if (simulating() || isHiddenPlayer(this) || ac::Bot::get().safeModeActive()) return;
         PlayerObject::incrementJumps();
+    }
+
+    void spawnCircle() {
+        if (isHiddenPlayer(this)) return;
+        PlayerObject::spawnCircle();
+    }
+
+    void spawnPortalCircle(ccColor3B color, float startRadius) {
+        if (isHiddenPlayer(this)) return;
+        PlayerObject::spawnPortalCircle(color, startRadius);
+    }
+
+    void playSpiderDashEffect(CCPoint from, CCPoint to) {
+        if (isHiddenPlayer(this)) return;
+        PlayerObject::playSpiderDashEffect(from, to);
     }
 };
 
-class $modify(ACHardStreak, HardStreak) {
-    void addPoint(CCPoint point) {
-        // Keep the wave trail clean while the planner tries out inputs.
-        if (ac::simContext().active) return;
-        HardStreak::addPoint(point);
+class $modify(ACGameObject, GameObject) {
+    void playShineEffect() {
+        if (simulating()) return;
+        GameObject::playShineEffect();
+    }
+};
+
+class $modify(ACEnhancedGameObject, EnhancedGameObject) {
+    void powerOnObject(int state) {
+        if (simulating()) return;
+        EnhancedGameObject::powerOnObject(state);
+    }
+};
+
+class $modify(ACEffectGameObject, EffectGameObject) {
+    void triggerObject(GJBaseGameLayer* layer, int uniqueID, gd::vector<int> const* remapKeys) {
+        if (simulating()) return;
+        EffectGameObject::triggerObject(layer, uniqueID, remapKeys);
     }
 };

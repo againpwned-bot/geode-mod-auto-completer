@@ -78,8 +78,7 @@ void PathViewer::update(PlayLayer* layer) {
     if (!m_node || !layer || layer != m_layer) return;
 
     auto const& bot = Bot::get();
-    bool const show = settings::enabled() && settings::pathViewer() && bot.hasPlan() &&
-        bot.state() != BotState::Computing && bot.planEnd() > 1;
+    bool const show = settings::enabled() && settings::pathViewer() && bot.hasPlan() && bot.planEnd() > 1;
     m_node->setVisible(show);
     if (!show) return;
 

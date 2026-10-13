@@ -117,6 +117,14 @@ public:
         return result;
     }
 
+    // Start a planning copy from another simulator's current state, at tick 0.
+    void copyStateFrom(ToySim const& other) {
+        m_state = other.m_state;
+        m_state.tick = 0;
+    }
+
+    bool held() const { return m_state.held; }
+
     int liveSnapshots() const {
         int n = 0;
         for (bool b : m_live) n += b ? 1 : 0;
@@ -446,6 +454,64 @@ int main() {
             if (ok) ok = replay(level, played, player) == Event::Completed;
             if (sim.liveSnapshots() != 0) ok = false;
             std::printf("live %-24s %-8s %s\n", level.name.c_str(), styleName(style), ok ? "ok" : "FAILED");
+            if (!ok) failures++;
+        }
+    }
+
+    // Look-ahead pilot, exactly like the game loop: every 8 ticks plan ~200 ticks ahead
+    // from the real state, keep the next 24 ticks fixed, splice the result into the plan.
+    for (auto const& level : levels) {
+        if (level.name == "impossible wall") continue;
+        for (PlayStyle style : styles) {
+            constexpr int kHorizon = 200;
+            constexpr int kFloor = 12;
+            constexpr int kEvery = 16;
+
+            ToySim real(level);
+            std::vector<uint8_t> plan;
+            int planEnd = 0;
+            int lastCheck = -1000000;
+            long simTicks = 0;
+            Event outcome = Event::None;
+
+            for (int frame = 0; frame < 100000 && outcome == Event::None; ++frame) {
+                int const t0 = real.tick();
+                if (t0 - lastCheck >= kEvery || planEnd < t0 + kHorizon / 2) {
+                    ToySim sim(level);
+                    sim.copyStateFrom(real);
+                    std::vector<uint8_t> seed;
+                    for (int t = t0; t < planEnd && t < static_cast<int>(plan.size()); ++t) seed.push_back(plan[t]);
+                    int const seedSize = static_cast<int>(seed.size());
+
+                    PlannerConfig config = PlannerConfig::forStyle(style, 5);
+                    config.goalTicks = kHorizon;
+                    {
+                        Planner planner(sim, config, real.held(), seed, kFloor);
+                        while (planner.step() == Planner::Status::Running) {}
+                        int end = planner.status() == Planner::Status::Completed ? planner.endTick() : planner.bestFrontier();
+                        end = std::min<int>(end, static_cast<int>(planner.inputs().size()));
+                        int const from = std::min(kFloor, seedSize);
+                        if (static_cast<int>(plan.size()) < t0 + end) plan.resize(t0 + end, 0);
+                        for (int rel = from; rel < end; ++rel) plan[t0 + rel] = planner.inputs()[rel];
+                        if (end > from || t0 + end > planEnd) planEnd = std::max(t0 + end, std::min(planEnd, t0 + from));
+                    }
+                    simTicks += sim.ticks();
+                    lastCheck = t0;
+                    if (sim.liveSnapshots() != 0) { outcome = Event::Died; break; }
+                }
+
+                for (int i = 0; i < 4 && outcome == Event::None; ++i) {
+                    int const t = real.tick();
+                    bool const want = t < planEnd && t < static_cast<int>(plan.size()) && plan[t];
+                    InputFn input = [want](int, Mode) { return want; };
+                    SampleFn sample = [](int, Sample const&) {};
+                    outcome = real.run(t + 1, input, sample).event;
+                }
+            }
+
+            bool const ok = outcome == Event::Completed;
+            std::printf("pilot %-24s %-8s %s (%ld sim ticks for %d real ticks)\n",
+                level.name.c_str(), styleName(style), ok ? "ok" : "FAILED", simTicks, real.tick());
             if (!ok) failures++;
         }
     }

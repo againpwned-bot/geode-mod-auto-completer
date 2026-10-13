@@ -5,9 +5,9 @@
 	},
 	"id": "againpwned.auto-completer",
 	"name": "Auto Completer",
-	"version": "v1.1.0",
+	"version": "v1.2.0",
 	"developer": "againpwned",
-	"description": "Pathfinding bot that beats levels for you, with play styles, a path viewer and a Mega Hack style menu.",
+	"description": "Pathfinding bot that plays levels for you in real time, with play styles, a path viewer and a Mega Hack style menu.",
 	"tags": [
 		"gameplay",
 		"utility"
@@ -49,38 +49,19 @@
 		"auto-correct": {
 			"type": "bool",
 			"name": "Auto Correct",
-			"description": "If the real run drifts away from the planned path, plan again from that point.",
-			"default": true
-		},
-		"live-mode": {
-			"type": "bool",
-			"name": "Live Mode",
-			"description": "Play the level normally while the bot plans a few seconds ahead in small slices every frame. Turn it off to plan the whole level first (the game freezes while it plans).",
+			"description": "If the real player drifts away from the predicted path, re-check right away instead of waiting for the next regular check.",
 			"default": true
 		},
 		"live-budget": {
 			"type": "int",
-			"name": "Live Budget (ms per frame)",
-			"description": "How much time the planner may use each frame in Live Mode. Higher plans further ahead but can lower your frame rate.",
-			"default": 6,
+			"name": "Planning Budget (ms per frame)",
+			"description": "Most time the bot may spend planning in one frame. It usually needs far less; lower this if your frame rate drops.",
+			"default": 4,
 			"min": 1,
 			"max": 30,
 			"control": {
 				"slider": true,
 				"slider-step": 1,
-				"input": true
-			}
-		},
-		"compute-budget": {
-			"type": "int",
-			"name": "Compute Budget (ms per frame)",
-			"description": "How long the planner may run each frame while computing a path. Higher values plan faster.",
-			"default": 30,
-			"min": 5,
-			"max": 200,
-			"control": {
-				"slider": true,
-				"slider-step": 5,
 				"input": true
 			}
 		},

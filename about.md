@@ -1,18 +1,16 @@
 # Auto Completer
 
-A pathfinding bot for Geometry Dash. Open a level and it plans a safe route with the game's own physics, then plays it for you. You don't need to touch anything.
+A pathfinding bot for Geometry Dash that plays levels for you in real time, with no waiting or freezing.
 
 ## Features
-- **Live mode**: the game runs normally; the bot plans a few seconds ahead in tiny slices every frame and does the inputs. (Precompute mode is still available.)
-- **Real pathfinding**: the bot rewinds with GD checkpoints and tests jump timings against the level's actual physics, triggers and hitboxes.
+- **Real-time pathfinding**: an invisible copy of your player simulates ~0.8 s ahead against the level's blocks, spikes, orbs and pads, and the bot clicks for you. The real game is never paused or rewound.
 - **Play styles**: *Default*, *Perfect* (frame precise, widest margins), *Legit Human* (natural timing and tap lengths) and *Minimal* (fewest, latest clicks).
-- **Path viewer**: draws the planned route in the level, green while holding and white while released, with markers where each click starts and ends.
-- **Auto correct**: re-plans from the current point if the run ever drifts from the plan.
+- **Path viewer**: the planned route is drawn in the level (green holding, white released) with click markers.
 - **Ignore inputs**: blocks your own clicks while the bot plays.
 - **Mega Hack style menu**: press **Tab** (configurable in the mod settings).
 
 ## Safe mode
-While the bot is active, safe mode is always on. No progress, stars, coins or leaderboard submissions are saved, and the bot is disabled on editor levels, so it can't be used to verify a level.
+While the bot is active, safe mode is always on. No progress, stars, coins or leaderboard submissions are saved, and the bot is disabled on editor levels so it can't be used to verify a level.
 
 ## Limitations
 - Classic levels only. Platformer and 2-player levels are not supported yet.

@@ -41,9 +41,37 @@ PlannerConfig PlannerConfig::forStyle(PlayStyle style, uint32_t seed) {
     return config;
 }
 
-Planner::Planner(Simulator& sim, PlannerConfig config, bool initialHold)
-    : m_sim(sim), m_cfg(config), m_rng(config.seed) {
+Planner::Planner(Simulator& sim, PlannerConfig config, bool initialHold, std::vector<uint8_t> seed, int floor)
+    : m_sim(sim), m_cfg(config), m_rng(config.seed), m_seed(std::move(seed)) {
     int const start = m_sim.tick();
+    m_floor = std::max(floor, 0);
+    m_forcedEnd = std::min(m_floor, static_cast<int>(m_seed.size()));
+
+    // Presses and releases of the seed after the floor become revisable decisions.
+    int lastDecision = m_floor - 1;
+    for (int tick = m_floor; tick < static_cast<int>(m_seed.size()); ++tick) {
+        bool const previous = tick == 0 ? initialHold : m_seed[tick - 1] != 0;
+        bool const current = m_seed[tick] != 0;
+        if (current == previous) continue;
+
+        int run = 1;
+        while (tick + run < static_cast<int>(m_seed.size()) && (m_seed[tick + run] != 0) == current) {
+            run += 1;
+        }
+        Decision decision;
+        decision.state = current;
+        decision.tapLen = current ? run : 0;
+        m_plan[tick] = decision;
+
+        StackEntry entry;
+        entry.tick = tick;
+        entry.decision = decision;
+        entry.deathTick = tick + m_cfg.horizonMin + 8;
+        entry.lo = std::max(lastDecision + 1, m_floor);
+        entry.scanNext = tick - 1;
+        m_stack.push_back(std::move(entry));
+        lastDecision = tick;
+    }
 
     Policy policy;
     policy.held = initialHold;
@@ -94,6 +122,19 @@ Planner::Status Planner::step() {
 }
 
 bool Planner::policyInput(Policy& policy, int tick, Mode mode, Decision const* extra, int extraTick) const {
+    if (tick >= 0 && tick < m_forcedEnd) {
+        // Before the floor the seed is played exactly.
+        bool const held = m_seed[tick] != 0;
+        if (held && !policy.held) {
+            int run = 1;
+            while (tick + run < static_cast<int>(m_seed.size()) && m_seed[tick + run]) run += 1;
+            policy.pressTick = tick;
+            policy.tapLen = run;
+        }
+        policy.held = held;
+        return held;
+    }
+
     Decision const* decision = nullptr;
     if (extra && tick == extraTick) {
         decision = extra;
@@ -277,6 +318,14 @@ void Planner::advance() {
     m_cursorTick = result.endTick;
     m_frontier = result.endTick;
     this->pushSnap();
+
+    if (m_cfg.goalTicks > 0 && m_frontier >= m_cfg.goalTicks) {
+        m_maxFrontier = std::max(m_maxFrontier, m_frontier);
+        this->syncBest();
+        m_endTick = m_frontier;
+        m_status = Status::Completed;
+        return;
+    }
 
     if (m_frontier > m_maxFrontier) {
         m_maxFrontier = m_frontier;

@@ -84,6 +84,7 @@ struct PlannerConfig {
     double timingJitter = 0.0; // stddev of the chosen tick, as a fraction of the window
     int lockTicks = 2400;      // decisions further back than this are never revisited
     int regionBudget = 4000;   // fix evaluations allowed without progress before giving up
+    int goalTicks = 0;         // > 0: done once this many ticks are planned (look-ahead mode)
     uint32_t seed = 0;
 
     static PlannerConfig forStyle(PlayStyle style, uint32_t seed);
@@ -93,8 +94,15 @@ class Planner {
 public:
     enum class Status { Running, Completed, Stuck };
 
-    // The simulator must be positioned at the state planning should start from.
-    Planner(Simulator& sim, PlannerConfig config, bool initialHold);
+    // The simulator must be positioned at the state planning should start from (tick 0).
+    //
+    // `seed` is a previous plan (one input bit per tick from the start). Ticks before
+    // `floor` play the seed exactly and can never change; after the floor, the seed's
+    // presses and releases become ordinary decisions the search may revise.
+    Planner(
+        Simulator& sim, PlannerConfig config, bool initialHold,
+        std::vector<uint8_t> seed = {}, int floor = 0
+    );
     ~Planner();
 
     Planner(Planner const&) = delete;
@@ -219,6 +227,8 @@ private:
     int m_totalEvals = 0;
     int m_startHandle = -1;
     int m_floor = 0;
+    std::vector<uint8_t> m_seed;
+    int m_forcedEnd = 0;
 
     // The simulator is positioned at m_cursorTick following the current plan.
     bool m_cursorValid = false;

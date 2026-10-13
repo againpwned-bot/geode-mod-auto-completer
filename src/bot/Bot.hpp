@@ -3,9 +3,9 @@
 #include <Geode/Geode.hpp>
 
 #include "../planner/Planner.hpp"
-#include "GameSim.hpp"
+#include "FakeSim.hpp"
 
-#include <chrono>
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -14,25 +14,28 @@ namespace ac {
 
 enum class BotState {
     Off,         // disabled, not in a level, or in practice mode
-    Waiting,     // in a level, will compute a path on the next frame
-    Computing,   // planning (the game is frozen meanwhile)
-    Live,        // playing normally while planning a few seconds ahead in small slices
-    Playing,     // following a fully precomputed path
+    Playing,     // playing the level, planning ahead as it goes
     Finished,    // the level was completed this attempt
-    Failed,      // the player died while following the path
+    Died,        // the player died this attempt
     Unsupported, // level type the bot can't handle
 };
 
 struct BotStats {
     int clicks = 0;
-    int decisions = 0;
-    int evaluations = 0;
-    double computeSeconds = 0.0;
-    float selfTestDeviation = -1.f;
-    int plannedTicks = 0;
-    bool complete = false;
+    int checks = 0;          // look-ahead checks run
+    int searches = 0;        // checks that had to find a new path
+    long evaluations = 0;
+    int deaths = 0;
+    int desyncs = 0;
+    double microsPerTick = 0.0;    // cost of one simulated tick
+    double predictionError = -1.0; // average distance between prediction and reality
+    int inputDelay = 0;
+    int plannedAhead = 0;          // ticks planned ahead of the player
 };
 
+// Plays the level in real time. Every few ticks it copies the real player onto a hidden
+// player, simulates about 0.8 s ahead and, if that path dies, searches for inputs that
+// survive. The real game is never paused, rewound or touched by the simulation.
 class Bot {
 public:
     static Bot& get();
@@ -41,10 +44,7 @@ public:
     void onLevelInit(PlayLayer* layer);
     void onLevelQuit(PlayLayer* layer);
     void onReset(PlayLayer* layer);
-    // Called before the real frame update. Returns true when the frame was used for
-    // planning and the normal update must be skipped.
-    bool onFrame(PlayLayer* layer, float dt);
-    void afterFrame(PlayLayer* layer);
+    void onFrame(PlayLayer* layer);
     void beforeTick(PlayLayer* layer);
     void afterTick(PlayLayer* layer);
     void onRealDeath(PlayLayer* layer);
@@ -57,85 +57,79 @@ public:
     // --- menu ---
     BotState state() const { return m_state; }
     char const* stateName() const;
-    std::string statusText() const;
-    // How far ahead of the player the live plan currently reaches, in seconds.
-    float liveLeadSeconds() const;
-    float computeProgress() const { return m_computeProgress; }
-    float planProgress() const { return m_planProgress; }
+    std::string const& statusText() const { return m_status; }
     BotStats const& stats() const { return m_stats; }
-    PlayStyle planStyle() const { return m_planStyle; }
-    bool hasPlan() const { return m_planValid; }
     bool inLevel() const { return m_layer != nullptr; }
-    void requestRecompute();
+    bool hasPlan() const { return m_planEnd > 0; }
+    float leadSeconds() const { return m_stats.plannedAhead / 240.f; }
+    void requestRestart();
 
     // --- path viewer ---
     std::vector<uint8_t> const& planInputs() const { return m_inputs; }
     std::vector<Sample> const& planSamples() const { return m_samples; }
     int planEnd() const { return m_planEnd; }
-    unsigned currentTick() const;
     unsigned planRevision() const { return m_planRevision; }
+    unsigned currentTick() const;
 
 private:
     Bot() = default;
 
+    struct Check {
+        unsigned t0 = 0;
+        int seedSize = 0;
+        // Declared before the planner so the planner (which uses it) is destroyed first.
+        std::unique_ptr<FakeSim> sim;
+        std::unique_ptr<Planner> planner;
+    };
+
+    struct Calibration {
+        bool active = false;
+        unsigned t0 = 0;
+        std::array<std::vector<Sample>, 2> predicted;
+        std::array<double, 2> error {};
+        std::array<int, 2> count {};
+    };
+
     bool supported(PlayLayer* layer, std::string& reason) const;
-    bool readyToCompute(PlayLayer* layer) const;
-    void startLive(PlayLayer* layer);
-    void stopLive();
-    bool liveFrame(PlayLayer* layer);
-    void syncLiveView();
-    void runSelfTest(PlayLayer* layer);
-    void startCompute(PlayLayer* layer, bool replan);
-    void runCompute(PlayLayer* layer);
-    void finishCompute(PlayLayer* layer);
-    void cancelCompute(bool restore);
-    void pauseAudio();
-    void resumeAudio();
-    void invalidatePlan();
+    bool readyToPlay(PlayLayer* layer) const;
+    void resetAttempt();
+    void releaseHold(PlayLayer* layer);
+    void startCheck(PlayLayer* layer, unsigned now);
+    void finishCheck();
+    void startCalibration(PlayLayer* layer, unsigned now);
+    void finishCalibration();
+    void addSimCost(FakeSim const& sim);
     void setStatus(std::string status);
-    void updatePlanStats();
 
     PlayLayer* m_layer = nullptr;
     BotState m_state = BotState::Off;
     std::string m_status = "Not in a level";
 
-    // planning
-    std::unique_ptr<GameSim> m_sim;
-    std::unique_ptr<Planner> m_planner;
-    bool m_replanning = false;
-    unsigned m_computeStart = 0;
-    std::chrono::steady_clock::time_point m_computeBegan;
-    double m_computeSeconds = 0.0;
-    float m_computeProgress = 0.f;
-    bool m_audioPaused = false;
-    bool m_practiceWrap = false;
-
-    // plan (indexed by absolute tick, m_gameState.m_currentProgress)
-    bool m_planValid = false;
-    bool m_planComplete = false;
-    PlayStyle m_planStyle = PlayStyle::Default;
+    // plan, indexed by the real game's tick (m_gameState.m_currentProgress)
     std::vector<uint8_t> m_inputs;
     std::vector<Sample> m_samples;
     int m_planEnd = 0;
-    unsigned m_planBegin = 0; // first tick covered by the plan
     unsigned m_planRevision = 0;
-    float m_planProgress = 0.f;
-    BotStats m_stats;
 
-    // live mode
-    bool m_livePlanning = true; // hysteresis: plan until far enough ahead, then idle
-    int m_liveFrames = 0;
-    bool m_selfTested = false;
+    std::unique_ptr<Check> m_check;
+    int m_lastCheck = -1000000;
+    bool m_forceCheck = false;
+    bool m_desyncFlagged = false;
 
-    // playback
+    Calibration m_calibration;
+    std::array<double, 2> m_delayError { -1.0, -1.0 };
+    int m_inputDelay = 0;
+
+    long m_simTicks = 0;
+    double m_simSeconds = 0.0;
+
     bool m_appliedHold = false;
     unsigned m_tickBefore = 0;
     bool m_usedThisAttempt = false;
-    bool m_divergence = false;
-    int m_replans = 0;
-    int m_failures = 0;
     bool m_requestRestart = false;
-    uint32_t m_seedSalt = 0;
+    uint32_t m_attempt = 0;
+
+    BotStats m_stats;
 };
 
 } // namespace ac

@@ -1,36 +1,33 @@
 # Auto Completer (Geode mod)
 
-A pathfinding bot for **Geometry Dash 2.2081** on **Geode v5**. It plans a safe route through a level with the game's own physics, then plays it automatically. It has play styles, a path viewer and a Mega Hack style ImGui menu (**Tab**).
-
-## Modes
-- **Live mode (default):** the game runs at normal speed. Every frame the bot spends a few milliseconds planning 2 to 4 seconds ahead of the player and presses the jump button for you. The music and sound effects are not touched while it looks ahead.
-- **Precompute mode** (turn Live Mode off): the bot plans the whole level first while the game is frozen, then plays it.
+A pathfinding bot for **Geometry Dash 2.2081** on **Geode v5**. It plays levels for you in real time: no waiting, no freezing. It has play styles, a path viewer and a Mega Hack style ImGui menu (**Tab**).
 
 ## How it works
-1. In precompute mode the bot freezes the game and plans first; in live mode it does the same search in small slices while you play. It runs the real game forward tick by tick (240 ticks/s) using GD's checkpoint system to rewind.
-2. With nobody pressing anything, the player eventually dies at some tick. The planner then looks back from that tick for every tick where flipping the input avoids the death. Those ticks form a safe timing window.
-3. The play style picks a tick inside the window:
-   - **Default**: middle of the window.
-   - **Perfect**: frame precise scan and the middle of the widest window.
-   - **Legit Human**: jittered timing and tap length.
-   - **Minimal**: the latest safe tick.
-4. If no tick works, it backtracks to the previous decision and tries its next best option (depth first search with a work budget).
-5. Once the path reaches the end, the level restarts and the bot plays the recorded inputs. With **Auto correct** on, any drift between the real run and the plan triggers a re-plan from that point.
+- **Hidden player.** The bot keeps an invisible copy of your player inside the level. Every 16 ticks (GD runs 240 per second) it copies the real player onto it and simulates about 0.8 s ahead against the level's blocks, spikes, slopes, orbs and pads. The real game is never paused, rewound or touched.
+- **Exact physics calls.** On the first tick the bot records which physics calls GD makes on your player (update / collision / post-collision), and the hidden player replays exactly that sequence. It also measures whether a click takes effect on the same tick or the next by comparing its predictions with what the real player does. It keeps whichever model predicts better; the accuracy shows in the Stats window.
+- **Search only when needed.** If the predicted path dies, the planner looks back from the death for ticks where pressing or releasing avoids it. Those ticks form a safe timing window. The play style picks a tick inside it:
+  - **Default:** the middle of the window.
+  - **Perfect:** the middle, scanned frame by frame.
+  - **Legit Human:** natural jitter in timing and tap length.
+  - **Minimal:** the latest safe tick.
 
-The planner lives in `src/planner` with no Geode dependencies. It's unit tested against a toy physics model in `tests/planner_test.cpp`, and CI runs that test with sanitizers on every push.
+  If nothing in the window works, the planner backtracks to earlier decisions. The next 12 ticks are always fixed, so the bot never changes an input it is about to play.
+- **Portals.** Portals and triggers are left to the real game. The plan is re-checked from the real player's state, so the bot adapts after each portal.
+
+The planner (`src/planner`) has no Geode dependencies. It is unit tested against a toy physics model in `tests/planner_test.cpp`, including the exact look-ahead loop the game uses. CI runs those tests with sanitizers on every push.
 
 ## Safe mode
 Safe mode is always on while the bot is active. It uses the same flag as start positions, so nothing is saved: no progress, stars, coins or leaderboard submissions. The bot is disabled on editor levels, so it can't verify uploads.
 
-## Install (Windows or Linux through Steam/Proton)
+## Install (Windows, or Linux through Steam/Proton)
 1. Install [Geode](https://geode-sdk.org) for GD 2.2081.
-2. Download the `.geode` file from the latest successful run on the repo's **Actions** tab (artifact "Auto Completer (Windows)").
+2. Get `againpwned.auto-completer.geode` from `dist/` on this branch, or from the latest run on the **Actions** tab.
 3. Copy it to `<GD folder>/geode/mods/`. On Linux with Steam the GD folder is usually `~/.local/share/Steam/steamapps/common/Geometry Dash/`.
-4. Start the game, open a level and press **Tab** for the menu.
+4. Open a level and press **Tab** for the menu.
 
 ## Building locally
-- **Windows**: install the Geode CLI and SDK, then run `geode build`.
-- **Linux**: run `geode sdk install-linux` once, then `geode build`. This cross-compiles the Windows DLL.
+- **Windows:** `geode build`.
+- **Linux:** `geode sdk install-linux` once, then `geode build`. This cross-compiles the Windows DLL.
 
 To run the planner tests:
 
@@ -40,4 +37,4 @@ g++ -std=c++20 -O2 -I src tests/planner_test.cpp src/planner/Planner.cpp -o plan
 
 ## Limitations
 - Classic levels only (no platformer or 2-player yet).
-- Planning time grows with level length. The *Perfect* style is the slowest.
+- Moving objects are predicted where they currently are. Re-checking every 16 ticks keeps this close, but fast movers can still surprise it.

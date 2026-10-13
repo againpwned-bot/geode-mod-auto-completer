@@ -40,12 +40,9 @@ float uiScale() {
 
 ImVec4 stateColor(BotState state) {
     switch (state) {
-        case BotState::Live:
         case BotState::Playing:
         case BotState::Finished: return kGood;
-        case BotState::Waiting:
-        case BotState::Computing: return kWarn;
-        case BotState::Failed:
+        case BotState::Died: return kWarn;
         case BotState::Unsupported: return kBad;
         case BotState::Off: return kMuted;
     }
@@ -147,25 +144,17 @@ void drawBotWindow(Bot& bot) {
         ImGui::TextWrapped("%s", bot.statusText().c_str());
         ImGui::PopStyleColor();
 
-        if (bot.state() == BotState::Computing) {
-            ImGui::ProgressBar(bot.computeProgress(), ImVec2(-FLT_MIN, 0.f), "planning");
-        }
-        else if (bot.state() == BotState::Live) {
-            auto label = fmt::format("{:.1f} s ahead", bot.liveLeadSeconds());
-            ImGui::ProgressBar(std::min(bot.liveLeadSeconds() / 4.f, 1.f), ImVec2(-FLT_MIN, 0.f), label.c_str());
-        }
-        else if (bot.hasPlan()) {
-            auto label = fmt::format("path {:.0f}%", bot.planProgress() * 100.f);
-            ImGui::ProgressBar(bot.planProgress(), ImVec2(-FLT_MIN, 0.f), label.c_str());
+        if (bot.state() == BotState::Playing) {
+            auto label = fmt::format("planned {:.2f} s ahead", bot.leadSeconds());
+            ImGui::ProgressBar(std::min(bot.leadSeconds() / 0.83f, 1.f), ImVec2(-FLT_MIN, 0.f), label.c_str());
         }
 
         ImGui::Spacing();
         ImGui::BeginDisabled(!bot.inLevel());
-        if (ImGui::Button("Recompute path", ImVec2(-FLT_MIN, 0.f))) {
-            bot.requestRecompute();
+        if (ImGui::Button("Restart level", ImVec2(-FLT_MIN, 0.f))) {
+            bot.requestRestart();
         }
         ImGui::EndDisabled();
-        tooltip("Throw away the current path, restart the level and plan again.");
 
         ImGui::Spacing();
         ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
@@ -184,7 +173,7 @@ void drawStyleWindow(Bot& bot) {
         };
         static Option const options[] = {
             { PlayStyle::Default, "Default", "Balanced. Clicks in the middle of each safe timing window." },
-            { PlayStyle::Perfect, "Perfect", "Frame precise scan with the widest margins. Slower to plan." },
+            { PlayStyle::Perfect, "Perfect", "Frame precise scan with the widest timing margins." },
             { PlayStyle::Human, "Legit Human", "Natural timing spread and tap lengths, like a real player." },
             { PlayStyle::Minimal, "Minimal", "Latest safe click and shortest taps. Fewest inputs." },
         };
@@ -201,10 +190,7 @@ void drawStyleWindow(Bot& bot) {
             ImGui::PopStyleColor();
         }
 
-        if (bot.hasPlan() && bot.planStyle() != current) {
-            ImGui::Spacing();
-            ImGui::TextColored(kWarn, "Applies from the next attempt.");
-        }
+        (void)bot;
     }
     ImGui::End();
 }
@@ -226,18 +212,11 @@ void drawPathWindow() {
 void drawSettingsWindow() {
     if (beginColumn("Settings", 3)) {
         settingSwitch("Ignore inputs", "ignore-inputs", "Block your own clicks while the bot is playing.");
-        settingSwitch("Live mode", "live-mode", "Play normally while the bot plans a few seconds ahead every frame. Off: plan the whole level first (the game freezes while it plans).");
-        settingSwitch("Auto correct", "auto-correct", "If the real run drifts from the plan, re-plan from that point.");
+        settingSwitch("Auto correct", "auto-correct", "If the real player drifts from the prediction, re-check right away.");
         settingSwitch("Status HUD", "show-hud", "Small status line in the corner while in a level.");
         ImGui::Spacing();
-        if (settings::liveMode()) {
-            settingSliderInt("Live budget", "live-budget", 1, 30, "%d ms / frame",
-                "Planning time per frame in Live mode. Higher plans further ahead but can lower your frame rate.");
-        }
-        else {
-            settingSliderInt("Compute budget", "compute-budget", 5, 200, "%d ms / frame",
-                "Time spent planning per frame while computing the whole path. Higher plans faster.");
-        }
+        settingSliderInt("Planning budget", "live-budget", 1, 30, "%d ms / frame",
+            "Most time the bot may plan in one frame. It usually needs far less; lower it if your frame rate drops.");
         ImGui::Spacing();
         sectionLabel("Menu key: Geode > Auto Completer settings");
     }
@@ -247,60 +226,40 @@ void drawSettingsWindow() {
 void drawStatsWindow(Bot& bot) {
     if (beginColumn("Stats", 4)) {
         auto const& stats = bot.stats();
-        auto row = [](char const* name, std::string const& value) {
+        auto row = [](char const* name, std::string const& value, ImVec4 const* color = nullptr) {
             ImGui::TextColored(kMuted, "%s", name);
             ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.55f);
-            ImGui::TextUnformatted(value.c_str());
+            if (color) {
+                ImGui::TextColored(*color, "%s", value.c_str());
+            }
+            else {
+                ImGui::TextUnformatted(value.c_str());
+            }
         };
-        row("Style", settings::styleName(bot.planStyle()));
+        row("Style", settings::styleName(settings::playStyle()));
         row("Clicks", std::to_string(stats.clicks));
-        row("Planned ticks", std::to_string(stats.plannedTicks));
-        row("Decisions", std::to_string(stats.decisions));
+        row("Planned ahead", fmt::format("{:.2f} s", bot.leadSeconds()));
+        row("Checks", std::to_string(stats.checks));
+        row("Path searches", std::to_string(stats.searches));
         row("Evaluations", std::to_string(stats.evaluations));
-        row("Compute time", fmt::format("{:.1f} s", stats.computeSeconds));
-        row("Current tick", std::to_string(bot.currentTick()));
+        row("Sim cost", stats.microsPerTick > 0.0 ? fmt::format("{:.1f} us/tick", stats.microsPerTick) : std::string("-"));
 
-        if (stats.selfTestDeviation < 0.f) {
-            row("Restore check", "-");
-        }
-        else if (stats.selfTestDeviation <= 0.01f) {
-            ImGui::TextColored(kMuted, "Restore check");
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.55f);
-            ImGui::TextColored(kGood, "exact");
+        if (stats.predictionError < 0.0) {
+            row("Prediction", "-");
         }
         else {
-            ImGui::TextColored(kMuted, "Restore check");
-            ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.55f);
-            ImGui::TextColored(kWarn, "off by %.2f", stats.selfTestDeviation);
+            ImVec4 const& color = stats.predictionError < 0.5 ? kGood : stats.predictionError < 2.0 ? kWarn : kBad;
+            row("Prediction", fmt::format("off by {:.2f}", stats.predictionError), &color);
         }
-    }
-    ImGui::End();
-}
-
-void drawComputeOverlay(Bot& bot) {
-    if (bot.state() != BotState::Computing) return;
-
-    ImGuiIO& io = ImGui::GetIO();
-    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.84f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(380.f * s_scale, 0.f));
-    ImGui::SetNextWindowBgAlpha(0.88f);
-    ImGuiWindowFlags const flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
-        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
-        ImGuiWindowFlags_AlwaysAutoResize;
-    if (ImGui::Begin("##ac-computing", nullptr, flags)) {
-        ImGui::TextColored(kAccent, "AUTO COMPLETER");
-        ImGui::SameLine();
-        ImGui::TextColored(kMuted, "%s", settings::styleName(bot.planStyle()));
-        ImGui::TextUnformatted(bot.statusText().c_str());
-        auto label = fmt::format("{:.0f}%", bot.computeProgress() * 100.f);
-        ImGui::ProgressBar(bot.computeProgress(), ImVec2(-FLT_MIN, 0.f), label.c_str());
-        ImGui::TextColored(kMuted, "Testing inputs with the game's own physics...");
+        row("Input delay", fmt::format("{} tick", stats.inputDelay));
+        row("Desyncs", std::to_string(stats.desyncs));
+        row("Deaths", std::to_string(stats.deaths));
     }
     ImGui::End();
 }
 
 void drawHud(Bot& bot) {
-    if (!settings::showHud() || !bot.inLevel() || bot.state() == BotState::Computing) return;
+    if (!settings::showHud() || !bot.inLevel()) return;
     if (!settings::enabled() && !bot.safeModeActive()) return;
 
     ImGuiIO& io = ImGui::GetIO();
@@ -315,9 +274,9 @@ void drawHud(Bot& bot) {
         ImGui::TextUnformatted(settings::styleName(settings::playStyle()));
         ImGui::SameLine();
         ImGui::TextColored(stateColor(bot.state()), "%s", bot.stateName());
-        if (bot.state() == BotState::Live) {
+        if (bot.state() == BotState::Playing) {
             ImGui::SameLine();
-            ImGui::TextColored(kMuted, "%.1fs ahead", bot.liveLeadSeconds());
+            ImGui::TextColored(kMuted, "%.2fs ahead", bot.leadSeconds());
         }
         if (bot.safeModeActive()) {
             ImGui::SameLine();
@@ -397,7 +356,6 @@ void setup() {
 
 void draw() {
     auto& bot = Bot::get();
-    drawComputeOverlay(bot);
     drawHud(bot);
 
     if (!s_open) return;
