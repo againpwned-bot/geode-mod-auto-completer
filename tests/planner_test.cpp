@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <memory>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -513,6 +514,43 @@ int main() {
             std::printf("pilot %-24s %-8s %s (%ld sim ticks for %d real ticks)\n",
                 level.name.c_str(), styleName(style), ok ? "ok" : "FAILED", simTicks, real.tick());
             if (!ok) failures++;
+        }
+    }
+
+    // Stale plan: a check that starts from the previous plan with one press in the wrong
+    // place. The search can only move that press earlier, so it may get stuck; the bot
+    // then plans the same stretch again from scratch (only the fixed floor kept).
+    for (auto const& level : levels) {
+        if (level.name != "spikes" && level.name != "triple spike + stairs") continue;
+        for (PlayStyle style : styles) {
+            constexpr int kHorizon = 200;
+            constexpr int kFloor = 12;
+            int stuckFirst = 0;
+            int failed = 0;
+            for (int press = kFloor; press + 3 <= kHorizon; press += 3) {
+                ToySim sim(level);
+                std::vector<uint8_t> seed(kHorizon, 0);
+                for (int t = press; t < press + 3; ++t) seed[t] = 1;
+
+                PlannerConfig config = PlannerConfig::forStyle(style, 11);
+                config.goalTicks = kHorizon;
+                auto planner = std::make_unique<Planner>(sim, config, false, seed, kFloor);
+                while (planner->step() == Planner::Status::Running) {}
+                if (planner->status() == Planner::Status::Stuck) {
+                    stuckFirst += 1;
+                    sim.load(planner->startHandle());
+                    planner.reset();
+                    std::vector<uint8_t> floorOnly(seed.begin(), seed.begin() + kFloor);
+                    planner = std::make_unique<Planner>(sim, config, false, floorOnly, kFloor);
+                    while (planner->step() == Planner::Status::Running) {}
+                }
+                if (planner->status() != Planner::Status::Completed) failed += 1;
+                planner.reset();
+                if (sim.liveSnapshots() != 0) failed += 1;
+            }
+            std::printf("stale plan %-24s %-8s %s (%d of the seeds needed a fresh plan)\n",
+                level.name.c_str(), styleName(style), failed == 0 ? "ok" : "FAILED", stuckFirst);
+            if (failed) failures++;
         }
     }
 

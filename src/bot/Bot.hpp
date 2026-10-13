@@ -81,6 +81,12 @@ private:
     struct Check {
         unsigned t0 = 0;
         int seedSize = 0;
+        std::vector<uint8_t> seed;
+        bool initialHold = false;
+        bool seeded = false;    // the previous plan has presses/releases after the floor
+        bool retried = false;   // already re-planned without them
+        PlannerConfig config;
+        PlayerFix startFix;     // the real player when the check started
         // Declared before the planner so the planner (which uses it) is destroyed first.
         std::unique_ptr<FakeSim> sim;
         std::unique_ptr<Planner> planner;
@@ -99,7 +105,10 @@ private:
     void resetAttempt();
     void releaseHold(PlayLayer* layer);
     void startCheck(PlayLayer* layer, unsigned now);
+    void retryCheck();
     void finishCheck();
+    void logTrace(Planner const& planner, unsigned t0);
+    void diagnoseStuck(Check& check);
     void runProbe(PlayLayer* layer);
     void startCalibration(PlayLayer* layer, unsigned now);
     void finishCalibration();
@@ -147,6 +156,13 @@ private:
     int m_shadowLogged = 0;
     int m_selfTests = 0;
     bool m_selfTestDone = false;
+    int m_tracesLogged = 0;
+    int m_diagnoses = 0;
+
+    // GD's tick counter as seen before the frame vs at its first physics step.
+    unsigned m_frameProgress = 0;
+    bool m_firstStep = false;
+    int m_tickOffset = 0;
     bool m_usedThisAttempt = false;
     bool m_requestRestart = false;
     uint32_t m_attempt = 0;

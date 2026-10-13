@@ -272,6 +272,7 @@ void Planner::syncBest() {
 }
 
 void Planner::giveUp(int tick) {
+    this->note(TraceEntry::Kind::GiveUp, tick);
     m_fix.active = false;
     m_status = Status::Stuck;
     m_endTick = tick;
@@ -347,6 +348,7 @@ void Planner::beginFix(int deathTick) {
     m_fix.deathTick = deathTick;
     m_fix.lo = std::max({ lastDecision + 1, deathTick - m_cfg.maxLookback, this->lockTick(), 0 });
     m_fix.next = deathTick;
+    this->note(TraceEntry::Kind::Fix, deathTick, m_fix.lo);
 
     if (m_fix.lo > m_fix.next) {
         m_fix.active = false;
@@ -374,6 +376,7 @@ void Planner::stepFix() {
     bool const current = tick < static_cast<int>(m_bits.size()) && m_bits[tick];
     Decision decision = this->makeDecision(!current);
     int survival = this->evaluate(tick, decision, fix.deathTick);
+    this->note(TraceEntry::Kind::Eval, tick, survival);
 
     if (survival >= m_cfg.horizonMin) {
         fix.valid.push_back(Candidate{ tick, decision, survival });
@@ -470,6 +473,7 @@ void Planner::finishFix() {
     ordered.erase(ordered.begin());
 
     this->applyDecision(chosen.tick, chosen.decision);
+    this->note(TraceEntry::Kind::Choose, chosen.tick);
 
     StackEntry entry;
     entry.tick = chosen.tick;
@@ -497,6 +501,7 @@ void Planner::backtrack() {
 
         int const oldTick = top.tick;
         m_plan.erase(oldTick);
+        this->note(TraceEntry::Kind::Backtrack, oldTick);
 
         if (!top.alternatives.empty()) {
             Candidate alt = top.alternatives.front();
@@ -530,6 +535,7 @@ void Planner::backtrack() {
             m_fix.deathTick = deathTick;
             m_fix.lo = lo;
             m_fix.next = scanNext;
+            this->note(TraceEntry::Kind::Fix, deathTick, lo);
             return;
         }
     }

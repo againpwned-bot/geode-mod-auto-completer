@@ -164,6 +164,9 @@ public:
     InlineProbe probeInlines();
 
     void captureState(PlayerFix& out) const { out.capture(m_fake); }
+    // When set, restoring a snapshot also re-copies the real player's attributes (mode,
+    // size, ...) first, like a fresh simulation does.
+    static bool& reattributeOnLoad();
     void setClock(double time) { if (m_fake) m_fake->m_totalTime = time; }
     DeathInfo const& lastDeath() const { return m_lastDeath; }
 

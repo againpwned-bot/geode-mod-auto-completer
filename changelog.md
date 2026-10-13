@@ -1,3 +1,9 @@
+# v1.2.3
+- Fix: a check that kept a jump from the previous plan could only move that jump earlier, never later, so the bot locked in early jumps and gave up ("No safe path found"). Stuck checks now plan the stretch again from scratch.
+- Fix: plans are indexed by the tick the game is about to run, even if GD advances its tick counter before the physics step.
+- The hidden player now updates its last position every tick like the real one; the tick check ignores once-per-frame bookkeeping.
+- Diagnostics: when a check gets stuck, the log shows the planner's search and compares snapshot restores against fresh simulations (and repairs restores automatically if they lose state).
+
 # v1.2.2
 - Fix: the hidden player copied only part of the real player's state. It now copies every physics field GD uses (171 of them), including the level's 2.2 physics flags, the boost/fall state and the slope state, so it jumps exactly like the real one.
 - Diagnostics: every real tick is replayed on the hidden player and compared ("Tick match" in Stats). Differences, a jump self test and what killed the simulation are written to the Geode log.

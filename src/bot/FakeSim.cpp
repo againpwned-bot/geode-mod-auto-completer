@@ -293,11 +293,19 @@ int FakeSim::save() {
     return static_cast<int>(m_slots.size()) - 1;
 }
 
+bool& FakeSim::reattributeOnLoad() {
+    static bool value = false;
+    return value;
+}
+
 void FakeSim::load(int handle) {
     if (handle < 0 || handle >= static_cast<int>(m_slots.size()) || !m_fake) return;
     auto const& slot = m_slots[handle];
     if (!slot.used) return;
 
+    if (reattributeOnLoad() && m_layer && m_layer->m_player1) {
+        m_fake->copyAttributes(m_layer->m_player1);
+    }
     slot.fix.apply(m_fake);
     m_fake->m_isDead = false;
     m_held = slot.held;
@@ -365,6 +373,8 @@ void FakeSim::stepPhysics() {
 
     if (m_model.jumpVars == Place::End) player->updateJumpVariables();
     if (m_model.stateVars == Place::End) player->updateStateVariables();
+    // GD stores the position after every step (the field is misnamed in the bindings).
+    player->m_shipRotation = player->getPosition();
 }
 
 InlineProbe FakeSim::probeInlines() {

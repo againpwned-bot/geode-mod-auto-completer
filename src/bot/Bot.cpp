@@ -135,6 +135,9 @@ void Bot::onLevelInit(PlayLayer* layer) {
     m_probe = InlineProbe{};
     m_shadowLogged = 0;
     m_selfTests = 0;
+    m_tracesLogged = 0;
+    m_diagnoses = 0;
+    m_tickOffset = 0;
     m_simTicks = 0;
     m_simSeconds = 0.0;
     TickRecorder::get().reset();
@@ -189,6 +192,8 @@ void Bot::onReset(PlayLayer* layer) {
 
 void Bot::onFrame(PlayLayer* layer) {
     m_layer = layer;
+    m_frameProgress = layer->m_gameState.m_currentProgress;
+    m_firstStep = true;
 
     if (!settings::enabled() || layer->m_isPracticeMode) {
         if (m_state != BotState::Off) {
@@ -237,7 +242,8 @@ void Bot::onFrame(PlayLayer* layer) {
         this->runSelfTest(layer);
     }
 
-    unsigned const now = layer->m_gameState.m_currentProgress;
+    // Index of the tick the next physics step runs (see beforeTick).
+    unsigned const now = layer->m_gameState.m_currentProgress + m_tickOffset;
     auto const budget = std::chrono::microseconds(std::clamp<int64_t>(settings::liveBudget(), 1, 30) * 1000);
     auto const deadline = std::chrono::steady_clock::now() + budget;
 
@@ -265,7 +271,13 @@ void Bot::onFrame(PlayLayer* layer) {
             status = m_check->planner->step();
         } while (status == Planner::Status::Running && std::chrono::steady_clock::now() < deadline);
 
-        if (status != Planner::Status::Running) {
+        if (status == Planner::Status::Stuck && m_check->seeded && !m_check->retried) {
+            // The search can only move the previous plan's jumps earlier. Before giving
+            // up, plan this stretch again from scratch.
+            this->retryCheck();
+            m_check->sim->endSlice();
+        }
+        else if (status != Planner::Status::Running) {
             this->finishCheck();
         }
         else {
@@ -286,6 +298,16 @@ void Bot::startCheck(PlayLayer* layer, unsigned now) {
         seed.push_back(m_inputs[t]);
     }
     check->seedSize = static_cast<int>(seed.size());
+    check->initialHold = m_appliedHold;
+    for (int t = std::min(kFloor, check->seedSize); t < check->seedSize; ++t) {
+        bool const previous = t == 0 ? m_appliedHold : seed[t - 1] != 0;
+        if ((seed[t] != 0) != previous) {
+            check->seeded = true;
+            break;
+        }
+    }
+    check->seed = seed;
+    check->startFix.capture(layer->m_player1);
 
     check->sim = this->makeSim(layer, m_model);
 
@@ -293,6 +315,7 @@ void Bot::startCheck(PlayLayer* layer, unsigned now) {
         (m_attempt * 7919u) ^ (now * 40503u);
     PlannerConfig config = PlannerConfig::forStyle(settings::playStyle(), seedValue);
     config.goalTicks = kHorizon;
+    check->config = config;
     check->planner = std::make_unique<Planner>(*check->sim, config, m_appliedHold, std::move(seed), kFloor);
 
     m_check = std::move(check);
@@ -300,6 +323,110 @@ void Bot::startCheck(PlayLayer* layer, unsigned now) {
     m_forceCheck = false;
     m_desyncFlagged = false;
     m_stats.checks += 1;
+}
+
+void Bot::retryCheck() {
+    auto& check = *m_check;
+    if (m_tracesLogged < 6) {
+        m_tracesLogged += 1;
+        log::info("Plan from tick {} stuck while following the previous plan; planning again from scratch", check.t0);
+        this->logTrace(*check.planner, check.t0);
+    }
+    this->diagnoseStuck(check);
+    m_stats.evaluations += check.planner->evaluations();
+
+    // Back to the state the check started from, then forget the old planner (its
+    // snapshots are released, the hidden player keeps the loaded state).
+    check.sim->load(check.planner->startHandle());
+    check.planner.reset();
+
+    // Only the fixed part (the floor) of the previous plan is kept.
+    std::vector<uint8_t> seed(check.seed.begin(), check.seed.begin() + std::min<size_t>(kFloor, check.seed.size()));
+    check.planner = std::make_unique<Planner>(*check.sim, check.config, check.initialHold, std::move(seed), kFloor);
+    check.retried = true;
+}
+
+void Bot::diagnoseStuck(Check& check) {
+    if (m_diagnoses >= 4 || !check.planner || !check.sim) return;
+
+    int death = -1;
+    for (auto const& e : check.planner->trace()) {
+        if (e.kind == Planner::TraceEntry::Kind::Fix) {
+            death = e.a;
+            break;
+        }
+    }
+    if (death < 30) return;
+    m_diagnoses += 1;
+
+    struct Outcome {
+        float rise = 0.f;
+        int died = -1;
+        float diedY = 0.f;
+    };
+    auto runWith = [&](FakeSim& sim, int press) {
+        Outcome o;
+        float const y0 = check.startFix.nodePosition.y;
+        InputFn input = [press](int t, Mode) { return t >= press && t < press + 6; };
+        SampleFn sample = [&](int, Sample const& s) { o.rise = std::max(o.rise, s.y - y0); };
+        auto const result = sim.run(death + 40, input, sample);
+        if (result.event == Event::Died) {
+            o.died = result.eventTick;
+            o.diedY = sim.lastDeath().y;
+        }
+        return o;
+    };
+    auto show = [](int press, Outcome const& o) {
+        if (o.died < 0) return fmt::format("press {}: rise {:.1f} survived", press, o.rise);
+        return fmt::format("press {}: rise {:.1f} died at {} (y {:.1f})", press, o.rise, o.died, o.diedY);
+    };
+
+    // Same start, same inputs: once through the planner's snapshot restore, once through
+    // a freshly synced simulation.
+    std::string restored;
+    std::string fresh;
+    bool restoreBroken = false;
+    for (int offset : { 20, 35, 50 }) {
+        int const press = death - offset;
+        if (press < 0) continue;
+
+        check.sim->load(check.planner->startHandle());
+        Outcome const a = runWith(*check.sim, press);
+
+        auto const& recorder = TickRecorder::get();
+        FakeSim sim(m_layer, FakeWorld::get().player(), recorder.ops(), recorder.timeStep(), m_model, check.initialHold, &check.startFix);
+        Outcome const b = runWith(sim, press);
+
+        restored += " | " + show(press, a);
+        fresh += " | " + show(press, b);
+        if (a.died >= 0 && b.died < 0) restoreBroken = true;
+    }
+    check.sim->load(check.planner->startHandle());
+
+    log::info("Stuck at death tick {}. Restored:{} || Fresh:{}", death, restored, fresh);
+    if (restoreBroken && !FakeSim::reattributeOnLoad()) {
+        FakeSim::reattributeOnLoad() = true;
+        log::info("Snapshot restore loses state; re-copying player attributes on every restore from now on");
+    }
+}
+
+void Bot::logTrace(Planner const& planner, unsigned t0) {
+    using Kind = Planner::TraceEntry::Kind;
+    std::string out;
+    for (auto const& e : planner.trace()) {
+        if (out.size() > 3000) {
+            out += " ...";
+            break;
+        }
+        switch (e.kind) {
+            case Kind::Fix: out += fmt::format(" | death {} scan to {}:", e.a, e.b); break;
+            case Kind::Eval: out += fmt::format(" {}:{}", e.a, e.b); break;
+            case Kind::Choose: out += fmt::format(" -> press {}", e.a); break;
+            case Kind::Backtrack: out += fmt::format(" | undo {}", e.a); break;
+            case Kind::GiveUp: out += fmt::format(" | give up at {}", e.a); break;
+        }
+    }
+    log::info("Search from tick {} (tick:survival):{}", t0, out.empty() ? " none" : out);
 }
 
 void Bot::finishCheck() {
@@ -340,6 +467,11 @@ void Bot::finishCheck() {
         float const at = end > 0 ? progressOf(m_layer, samples[end - 1].x) : 0.f;
         this->setStatus(fmt::format("No safe path found ahead (around {})", percent(at)));
         this->logDeath(*check.sim);
+        if (m_tracesLogged < 6) {
+            m_tracesLogged += 1;
+            this->logTrace(planner, check.t0);
+        }
+        this->diagnoseStuck(check);
     }
     else {
         this->setStatus("Playing");
@@ -438,6 +570,16 @@ void Bot::addSimCost(FakeSim const& sim) {
 
 void Bot::beforeTick(PlayLayer* layer) {
     unsigned const progress = layer->m_gameState.m_currentProgress;
+    if (m_firstStep) {
+        // If GD bumps its tick counter before processCommands, the tick about to run is
+        // not the one the frame started with; plans are indexed by the running tick.
+        m_firstStep = false;
+        int const offset = std::clamp(static_cast<int>(progress) - static_cast<int>(m_frameProgress), 0, 2);
+        if (offset != m_tickOffset) {
+            log::info("Tick counter offset at the first step: {}", offset);
+            m_tickOffset = offset;
+        }
+    }
     // A new step starting means the previous one is fully done. A second call for the same
     // tick (half step) isn't a new tick.
     if (!m_tickOpen || progress != m_tickBefore) {
@@ -525,13 +667,17 @@ void Bot::runShadow(PlayLayer* layer) {
     PhysicsModel model = m_model;
     model.inputDelay = 0;
     FakeSim sim(layer, fake, recorder.ops(), recorder.timeStep(), model, m_shadowHeld, &m_shadowPre);
+    // GD sets the player's clock just before each step, so the state captured at the step
+    // start already has this tick's time.
     if (recorder.timeStep() > 0.0) {
-        sim.setClock(after.m_totalTime - recorder.timeStep());
+        sim.setClock(m_shadowPre.m_totalTime - recorder.timeStep());
     }
     bool const want = m_shadowWant;
     sim.run(1, [want](int, Mode) { return want; }, [](int, Sample const&) {});
     PlayerFix simulated;
     sim.captureState(simulated);
+    // Written by GD once per frame, not per tick.
+    simulated.m_position = after.m_position;
 
     size_t count = 0;
     std::string const fields = after.diff(simulated, 10, &count);

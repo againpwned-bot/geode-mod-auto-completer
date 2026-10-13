@@ -137,6 +137,15 @@ public:
     // Snapshot handle of the starting state; owned by the planner until it is destroyed.
     int startHandle() const;
 
+    // What the search did, for diagnostics (bounded).
+    struct TraceEntry {
+        enum class Kind : uint8_t { Fix, Eval, Choose, Backtrack, GiveUp };
+        Kind kind = Kind::Eval;
+        int a = 0; // Fix: death tick, Eval: tick, Choose/Backtrack/GiveUp: tick
+        int b = 0; // Fix: lowest tick scanned, Eval: survival past the death
+    };
+    std::vector<TraceEntry> const& trace() const { return m_trace; }
+
 private:
     struct Decision {
         bool state = false;
@@ -225,6 +234,10 @@ private:
     int m_endTick = 0;
     int m_regionEvals = 0;
     int m_totalEvals = 0;
+    std::vector<TraceEntry> m_trace;
+    void note(TraceEntry::Kind kind, int a, int b = 0) {
+        if (m_trace.size() < 600) m_trace.push_back(TraceEntry{ kind, a, b });
+    }
     int m_startHandle = -1;
     int m_floor = 0;
     std::vector<uint8_t> m_seed;
