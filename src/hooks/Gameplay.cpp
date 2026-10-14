@@ -231,6 +231,14 @@ class $modify(ACBaseGameLayer, GJBaseGameLayer) {
     void collisionCheckObjects(PlayerObject* player, gd::vector<GameObject*>* objects, int objectCount, float dt) {
         auto& ctx = ac::fakeContext();
         if (!ctx.active || player != ctx.player || !objects) {
+            if (!ctx.active && objects && player == m_player1 && isCurrentPlayLayer(this)) {
+                // Learn how objects near the real player move.
+                auto& tracker = ac::ObjectTracker::get();
+                int const count = std::min<int>(objectCount, static_cast<int>(objects->size()));
+                for (int i = 0; i < count; ++i) {
+                    tracker.observe((*objects)[i]);
+                }
+            }
             GJBaseGameLayer::collisionCheckObjects(player, objects, objectCount, dt);
             return;
         }
@@ -242,12 +250,16 @@ class $modify(ACBaseGameLayer, GJBaseGameLayer) {
             if (!object) continue;
             bool activatable = false;
             if (!simulatedType(object->m_objectType, activatable)) {
-                if (ctx.sim) ctx.sim->notePortal(object);
+                if (ctx.sim) {
+                    ctx.sim->placeObject(object);
+                    ctx.sim->notePortal(object);
+                }
                 continue;
             }
             if (activatable && ctx.sim) {
                 ctx.sim->noteObject(object);
             }
+            if (ctx.sim) ctx.sim->placeObject(object);
             kept.push_back(object);
         }
         GJBaseGameLayer::collisionCheckObjects(player, &kept, static_cast<int>(kept.size()), dt);

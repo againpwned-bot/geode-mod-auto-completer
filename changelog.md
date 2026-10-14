@@ -1,3 +1,7 @@
+# v1.3.3
+- Fix: moving objects (move triggers) were frozen in place in the simulation, so on harder levels the bot only noticed a moving spike or block a few ticks before hitting it, too late to react ("give up", then death). The bot now measures how fast every nearby and on-screen object moves and the hidden player sees each one where it will be at that moment, including moving hazards that are still far away.
+- The log's 5 second summary shows how many moving objects the bot is tracking.
+
 # v1.3.2
 - Diagnostics for harder levels: when the real player dies, the log names the object that killed it (id, type, size, whether it was moving, hidden, disabled or of a type the simulation skips) and replays that exact tick on the hidden player to show whether the simulation agrees.
 

@@ -118,6 +118,7 @@ void Bot::resetAttempt() {
     m_tickOpen = false;
     m_stepIndex = 0;
     m_seenStep = false;
+    ObjectTracker::get().reset();
     m_shadowValid = false;
     m_deathPending = false;
     m_selfTestDone = false;
@@ -314,7 +315,7 @@ void Bot::startCheck(PlayLayer* layer, unsigned now) {
     check->seed = seed;
     check->startFix.capture(layer->m_player1);
 
-    check->sim = this->makeSim(layer, m_model);
+    check->sim = this->makeSim(layer, m_model, static_cast<int>(now));
 
     uint32_t const seedValue = static_cast<uint32_t>(layer->m_level->m_levelID.value()) * 2654435761u ^
         (m_attempt * 7919u) ^ (now * 40503u);
@@ -404,7 +405,10 @@ void Bot::diagnoseStuck(Check& check) {
         Outcome const a = runWith(*check.sim, press);
 
         auto const& recorder = TickRecorder::get();
-        FakeSim sim(m_layer, FakeWorld::get().player(), recorder.ops(), recorder.timeStep(), m_model, check.initialHold, &check.startFix);
+        FakeSim sim(
+            m_layer, FakeWorld::get().player(), recorder.ops(), recorder.timeStep(), m_model, check.initialHold,
+            static_cast<int>(check.t0), &check.startFix
+        );
         Outcome const b = runWith(sim, press);
 
         restored += " | " + show(press, a);
@@ -490,10 +494,10 @@ void Bot::finishCheck() {
     m_check.reset();
 }
 
-std::unique_ptr<FakeSim> Bot::makeSim(PlayLayer* layer, PhysicsModel const& model) const {
+std::unique_ptr<FakeSim> Bot::makeSim(PlayLayer* layer, PhysicsModel const& model, int baseStep) const {
     auto const& recorder = TickRecorder::get();
     return std::make_unique<FakeSim>(
-        layer, FakeWorld::get().player(), recorder.ops(), recorder.timeStep(), model, m_appliedHold
+        layer, FakeWorld::get().player(), recorder.ops(), recorder.timeStep(), model, m_appliedHold, baseStep
     );
 }
 
@@ -503,7 +507,7 @@ void Bot::runProbe(PlayLayer* layer) {
     m_check.reset();
     m_calibration = Calibration{};
 
-    auto sim = this->makeSim(layer, m_model);
+    auto sim = this->makeSim(layer, m_model, static_cast<int>(m_stepIndex));
     m_probe = sim->probeInlines();
     m_probe.done = true;
     m_probeRevision = recorder.revision();
@@ -533,7 +537,7 @@ void Bot::startCalibration(PlayLayer* layer, unsigned now) {
         return tick < m_planEnd && tick < static_cast<int>(m_inputs.size()) && m_inputs[tick] != 0;
     };
     for (int v = 0; v < PhysicsModel::kVariants; ++v) {
-        auto sim = this->makeSim(layer, PhysicsModel::variant(v, m_model));
+        auto sim = this->makeSim(layer, PhysicsModel::variant(v, m_model), static_cast<int>(now));
         auto& out = cal.predicted[v];
         out.reserve(kCalibrationTicks);
         SampleFn sample = [&out](int, Sample const& s) { out.push_back(s); };
@@ -595,6 +599,8 @@ void Bot::beforeTick(PlayLayer* layer) {
     this->closeTick(layer);
     m_tickBefore = m_stepIndex;
     m_stepIndex += 1;
+    // GD moves objects right after this, so from here on they show this step.
+    ObjectTracker::get().setWorldStep(static_cast<int>(m_tickBefore));
     if (m_state != BotState::Playing) return;
     m_tickOpen = true;
 
@@ -617,6 +623,9 @@ void Bot::beforeTick(PlayLayer* layer) {
 
 void Bot::endFrame(PlayLayer* layer) {
     this->closeTick(layer);
+    if (m_state == BotState::Playing && layer) {
+        ObjectTracker::get().observeVisible(layer);
+    }
 }
 
 void Bot::closeTick(PlayLayer* layer) {
@@ -678,7 +687,9 @@ void Bot::runShadow(PlayLayer* layer) {
     // Same tick, same input, same starting state: the hidden player must end up identical.
     PhysicsModel model = m_model;
     model.inputDelay = 0;
-    FakeSim sim(layer, fake, recorder.ops(), recorder.timeStep(), model, m_shadowHeld, &m_shadowPre);
+    FakeSim sim(
+        layer, fake, recorder.ops(), recorder.timeStep(), model, m_shadowHeld, static_cast<int>(m_tickBefore), &m_shadowPre
+    );
     // GD sets the player's clock just before each step, so the state captured at the step
     // start already has this tick's time.
     if (recorder.timeStep() > 0.0) {
@@ -714,8 +725,9 @@ void Bot::runShadow(PlayLayer* layer) {
     }
     if (m_stats.shadowTicks % 1200 == 0) {
         log::info(
-            "Tick checks: {} ticks, {} differ; press/release ticks: {}, {} differ",
-            m_stats.shadowTicks, m_stats.shadowMismatches, m_shadowInputTicks, m_shadowInputMismatches
+            "Tick checks: {} ticks, {} differ; press/release ticks: {}, {} differ; moving objects: {} of {}",
+            m_stats.shadowTicks, m_stats.shadowMismatches, m_shadowInputTicks, m_shadowInputMismatches,
+            ObjectTracker::get().movingCount(), ObjectTracker::get().size()
         );
     }
 }
@@ -731,7 +743,9 @@ void Bot::checkDeathTick(PlayLayer* layer) {
     auto const& recorder = TickRecorder::get();
     PhysicsModel model = m_model;
     model.inputDelay = 0;
-    FakeSim sim(layer, fake, recorder.ops(), recorder.timeStep(), model, m_shadowHeld, &m_shadowPre);
+    FakeSim sim(
+        layer, fake, recorder.ops(), recorder.timeStep(), model, m_shadowHeld, static_cast<int>(m_tickBefore), &m_shadowPre
+    );
     if (recorder.timeStep() > 0.0) {
         sim.setClock(m_shadowPre.m_totalTime - recorder.timeStep());
     }
@@ -770,7 +784,7 @@ void Bot::runSelfTest(PlayLayer* layer) {
     auto test = [&](int pressAt) {
         Result r;
         PhysicsModel model = m_model;
-        auto sim = this->makeSim(layer, model);
+        auto sim = this->makeSim(layer, model, static_cast<int>(m_stepIndex));
         float const x0 = real->getPositionX();
         float const y0 = real->getPositionY();
         int lastAir = -1;

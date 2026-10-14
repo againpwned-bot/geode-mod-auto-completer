@@ -117,7 +117,8 @@ private:
     void checkDeathTick(PlayLayer* layer);
     void runSelfTest(PlayLayer* layer);
     void logDeath(FakeSim const& sim);
-    std::unique_ptr<FakeSim> makeSim(PlayLayer* layer, PhysicsModel const& model) const;
+    // `baseStep`: the real physics step the simulation's first tick stands for.
+    std::unique_ptr<FakeSim> makeSim(PlayLayer* layer, PhysicsModel const& model, int baseStep) const;
     void addSimCost(FakeSim const& sim);
     void setStatus(std::string status);
 

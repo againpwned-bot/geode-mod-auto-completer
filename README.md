@@ -41,4 +41,4 @@ g++ -std=c++20 -O2 -I src tests/gd_pilot_test.cpp src/planner/Planner.cpp -o gd_
 ## Limitations
 - Classic levels only (no platformer or 2-player yet).
 - After a mode portal the first plan only starts once the real player is through it, and flying modes use the game's current floor and ceiling.
-- Moving objects are predicted where they currently are. Re-checking every 16 ticks keeps this close, but fast movers can still surprise it.
+- Moving objects are predicted by extending their current speed in a straight line. Eased, rotating or toggled objects can still surprise it; re-checking every 16 ticks corrects most of that.
