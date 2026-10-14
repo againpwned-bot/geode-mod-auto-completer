@@ -1,3 +1,6 @@
+# v1.3.2
+- Diagnostics for harder levels: when the real player dies, the log names the object that killed it (id, type, size, whether it was moving, hidden, disabled or of a type the simulation skips) and replays that exact tick on the hidden player to show whether the simulation agrees.
+
 # v1.3.1
 - Fix: the bot jumped too early because it indexed its plan by GD's tick counter, which in 2.2081 advances by 2 per physics step. Plans were played back at double speed, so every click came early and the real player constantly drifted from the prediction. The bot now counts physics steps itself.
 

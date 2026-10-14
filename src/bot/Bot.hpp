@@ -51,7 +51,7 @@ public:
     void onFrame(PlayLayer* layer);
     void beforeTick(PlayLayer* layer);
     void endFrame(PlayLayer* layer);
-    void onRealDeath(PlayLayer* layer);
+    void onRealDeath(PlayLayer* layer, std::string const& killer);
     void onRealComplete(PlayLayer* layer);
 
     bool shouldBlockUserInput() const;
@@ -114,6 +114,7 @@ private:
     void finishCalibration();
     void closeTick(PlayLayer* layer);
     void runShadow(PlayLayer* layer);
+    void checkDeathTick(PlayLayer* layer);
     void runSelfTest(PlayLayer* layer);
     void logDeath(FakeSim const& sim);
     std::unique_ptr<FakeSim> makeSim(PlayLayer* layer, PhysicsModel const& model) const;
@@ -154,6 +155,8 @@ private:
     bool m_shadowHeld = false;
     bool m_shadowWant = false;
     int m_shadowLogged = 0;
+    bool m_deathPending = false;
+    std::string m_deathKiller;
     int m_shadowInputLogged = 0;
     long m_shadowInputTicks = 0;
     long m_shadowInputMismatches = 0;

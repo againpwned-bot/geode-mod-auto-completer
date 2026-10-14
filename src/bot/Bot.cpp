@@ -119,6 +119,7 @@ void Bot::resetAttempt() {
     m_stepIndex = 0;
     m_seenStep = false;
     m_shadowValid = false;
+    m_deathPending = false;
     m_selfTestDone = false;
     m_usedThisAttempt = false;
     m_stats.clicks = 0;
@@ -621,6 +622,10 @@ void Bot::endFrame(PlayLayer* layer) {
 void Bot::closeTick(PlayLayer* layer) {
     if (!m_tickOpen) return;
     m_tickOpen = false;
+    if (m_deathPending) {
+        m_deathPending = false;
+        this->checkDeathTick(layer);
+    }
     if (m_state != BotState::Playing || !layer || !layer->m_player1) return;
     auto const actual = layer->m_player1->getPosition();
     unsigned const tick = m_tickBefore;
@@ -715,6 +720,41 @@ void Bot::runShadow(PlayLayer* layer) {
     }
 }
 
+void Bot::checkDeathTick(PlayLayer* layer) {
+    // Replay the tick the real player died on, from the exact state it started in. If the
+    // hidden player survives, the simulation is missing whatever killed the real one; if
+    // it dies too, the plan went wrong earlier (for example an object moved meanwhile).
+    if (!m_shadowValid || !layer) return;
+    m_shadowValid = false;
+    auto* fake = FakeWorld::get().player();
+    if (!fake) return;
+    auto const& recorder = TickRecorder::get();
+    PhysicsModel model = m_model;
+    model.inputDelay = 0;
+    FakeSim sim(layer, fake, recorder.ops(), recorder.timeStep(), model, m_shadowHeld, &m_shadowPre);
+    if (recorder.timeStep() > 0.0) {
+        sim.setClock(m_shadowPre.m_totalTime - recorder.timeStep());
+    }
+    bool const want = m_shadowWant;
+    Sample last;
+    sim.run(1, [want](int, Mode) { return want; }, [&last](int, Sample const& s) { last = s; });
+
+    std::string outcome;
+    auto const& d = sim.lastDeath();
+    if (d.valid) {
+        outcome = fmt::format(
+            "died too, by obj {} type {} at ({:.1f},{:.1f})", d.objectId, d.objectType, d.objectX, d.objectY
+        );
+    }
+    else {
+        outcome = fmt::format("SURVIVED at ({:.1f},{:.1f})", last.x, last.y);
+    }
+    log::info(
+        "Death tick check: real player killed by {}; hidden player from the same state: {}",
+        m_deathKiller, outcome
+    );
+}
+
 void Bot::runSelfTest(PlayLayer* layer) {
     m_selfTestDone = true;
     m_selfTests += 1;
@@ -781,8 +821,10 @@ void Bot::logDeath(FakeSim const& sim) {
     );
 }
 
-void Bot::onRealDeath(PlayLayer* layer) {
+void Bot::onRealDeath(PlayLayer* layer, std::string const& killer) {
     if (m_state != BotState::Playing) return;
+    m_deathKiller = killer;
+    m_deathPending = true;
     float const at = progressOf(layer, layer->m_player1 ? layer->m_player1->getPositionX() : 0.f);
 
     // What the plan expected around the death, for the log.
@@ -801,8 +843,8 @@ void Bot::onRealDeath(PlayLayer* layer) {
             expected = fmt::format("({:.1f},{:.1f})", m_samples[tick].x, m_samples[tick].y);
         }
         log::info(
-            "Real player died at tick {} at ({:.1f},{:.1f}); plan expected {}; plan ends at {}; inputs before:{}",
-            tick, pos.x, pos.y, expected, m_planEnd, presses.empty() ? " none" : presses
+            "Real player died at tick {} at ({:.1f},{:.1f}) by {}; plan expected {}; plan ends at {}; inputs before:{}",
+            tick, pos.x, pos.y, killer, expected, m_planEnd, presses.empty() ? " none" : presses
         );
     }
     m_stats.deaths += 1;

@@ -61,6 +61,31 @@ namespace {
     }
 }
 
+namespace {
+    // What killed the real player, for the log.
+    std::string describeKiller(GameObject* object) {
+        if (!object) return "no object (crushed or out of bounds)";
+        bool activatable = false;
+        bool const simulated = simulatedType(object->m_objectType, activatable);
+        auto const rect = object->getObjectRect();
+        auto const last = object->getLastPosition();
+        auto const now = object->getRealPosition();
+        bool const moving = last.x != now.x || last.y != now.y;
+        return fmt::format(
+            "obj {} type {} at ({:.1f},{:.1f}) size {:.0f}x{:.0f}{}{}{}{}{}{}{}",
+            object->m_objectID, static_cast<int>(object->m_objectType), object->getPositionX(), object->getPositionY(),
+            rect.size.width, rect.size.height,
+            simulated ? "" : " [type not simulated]",
+            moving ? " moving" : "",
+            object->m_isNoTouch ? " noTouch" : "",
+            object->m_isPassable ? " passable" : "",
+            object->m_isHide ? " hidden" : "",
+            object->m_isGroupDisabled ? " groupDisabled" : "",
+            object->m_isDisabled ? " disabled" : ""
+        );
+    }
+}
+
 class $modify(ACPlayLayer, PlayLayer) {
     static void onModify(auto& self) {
         // Run before noclip style hooks from other mods, so the hidden player's deaths are
@@ -128,7 +153,7 @@ class $modify(ACPlayLayer, PlayLayer) {
         m_isTestMode = testMode;
 
         if ((m_player1 && m_player1->m_isDead) || (m_player2 && m_player2->m_isDead)) {
-            bot.onRealDeath(this);
+            bot.onRealDeath(this, describeKiller(object));
         }
     }
 
