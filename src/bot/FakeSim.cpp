@@ -248,6 +248,104 @@ void FakeSim::noteObject(GameObject* object) {
     m_log.push_back(entry);
 }
 
+namespace {
+    enum class PortalKind { None, Speed, Size, Gravity, Goal };
+
+    PortalKind portalKind(GameObject* object, float& speed) {
+        switch (object->m_objectType) {
+            case GameObjectType::NormalGravityPortal:
+            case GameObjectType::InverseGravityPortal:
+            case GameObjectType::GravityTogglePortal:
+                return PortalKind::Gravity;
+            case GameObjectType::RegularSizePortal:
+            case GameObjectType::MiniSizePortal:
+                return PortalKind::Size;
+            case GameObjectType::ShipPortal:
+            case GameObjectType::CubePortal:
+            case GameObjectType::BallPortal:
+            case GameObjectType::UfoPortal:
+            case GameObjectType::WavePortal:
+            case GameObjectType::RobotPortal:
+            case GameObjectType::SpiderPortal:
+            case GameObjectType::SwingPortal:
+            case GameObjectType::DualPortal:
+            case GameObjectType::SoloPortal:
+            case GameObjectType::TeleportPortal:
+                return PortalKind::Goal;
+            case GameObjectType::Modifier:
+                switch (object->m_objectID) {
+                    case 200: speed = 0.7f; return PortalKind::Speed;
+                    case 201: speed = 0.9f; return PortalKind::Speed;
+                    case 202: speed = 1.1f; return PortalKind::Speed;
+                    case 203: speed = 1.3f; return PortalKind::Speed;
+                    case 1334: speed = 1.6f; return PortalKind::Speed;
+                    default: return PortalKind::None;
+                }
+            default:
+                return PortalKind::None;
+        }
+    }
+
+    // Whether a mode portal would change anything for this player.
+    bool changesMode(GameObjectType type, PlayerObject* player) {
+        Mode const mode = modeOf(player);
+        switch (type) {
+            case GameObjectType::ShipPortal: return mode != Mode::Ship;
+            case GameObjectType::CubePortal: return mode != Mode::Cube;
+            case GameObjectType::BallPortal: return mode != Mode::Ball;
+            case GameObjectType::UfoPortal: return mode != Mode::Ufo;
+            case GameObjectType::WavePortal: return mode != Mode::Wave;
+            case GameObjectType::RobotPortal: return mode != Mode::Robot;
+            case GameObjectType::SpiderPortal: return mode != Mode::Spider;
+            case GameObjectType::SwingPortal: return mode != Mode::Swing;
+            default: return true;
+        }
+    }
+}
+
+void FakeSim::notePortal(GameObject* object) {
+    if (!object || !m_fake) return;
+    float speed = 0.f;
+    PortalKind const kind = portalKind(object, speed);
+    if (kind == PortalKind::None) return;
+    if (std::find(m_portalsUsed.begin(), m_portalsUsed.end(), object) != m_portalsUsed.end()) return;
+    if (!m_fake->getObjectRect().intersectsRect(object->getObjectRect())) return;
+    m_portalsUsed.push_back(object);
+
+    switch (kind) {
+        case PortalKind::Speed:
+            m_fake->m_playerSpeed = speed;
+            break;
+        case PortalKind::Size: {
+            bool const mini = object->m_objectType == GameObjectType::MiniSizePortal;
+            if (mini != (m_fake->m_vehicleSize != 1.f)) {
+                m_fake->togglePlayerScale(mini, true);
+                m_fake->updatePlayerScale();
+            }
+            break;
+        }
+        case PortalKind::Gravity: {
+            // Flipping goes through camera and level state, so a portal that would flip
+            // the player ends the look-ahead like a mode portal.
+            bool flip = m_fake->m_isUpsideDown;
+            if (object->m_objectType == GameObjectType::NormalGravityPortal) flip = false;
+            else if (object->m_objectType == GameObjectType::InverseGravityPortal) flip = true;
+            else flip = !m_fake->m_isUpsideDown;
+            if (flip != m_fake->m_isUpsideDown) {
+                m_reachedGoal = true;
+            }
+            break;
+        }
+        case PortalKind::Goal:
+            if (changesMode(object->m_objectType, m_fake)) {
+                m_reachedGoal = true;
+            }
+            break;
+        case PortalKind::None:
+            break;
+    }
+}
+
 void FakeSim::beginSlice() {
     if (m_inSlice) return;
     m_inSlice = true;
@@ -277,6 +375,7 @@ int FakeSim::save() {
     slot.held = m_held;
     slot.previousWant = m_previousWant;
     slot.tick = m_tick;
+    slot.portals = m_portalsUsed;
     slot.flags.reserve(m_log.size());
     for (auto const& entry : m_log) {
         slot.flags.push_back(read(entry.object));
@@ -311,6 +410,8 @@ void FakeSim::load(int handle) {
     m_held = slot.held;
     m_previousWant = slot.previousWant;
     m_tick = slot.tick;
+    m_portalsUsed = slot.portals;
+    m_reachedGoal = false;
     for (size_t i = 0; i < m_log.size(); ++i) {
         write(m_log[i].object, i < slot.flags.size() ? slot.flags[i] : m_log[i].base);
     }
@@ -488,7 +589,7 @@ RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& samp
             }
             break;
         }
-        if (levelEnd > 0.f && s.x >= levelEnd) {
+        if ((levelEnd > 0.f && s.x >= levelEnd) || m_reachedGoal) {
             result.event = Event::Completed;
             result.eventTick = tick;
             break;

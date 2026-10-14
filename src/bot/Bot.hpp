@@ -154,6 +154,9 @@ private:
     bool m_shadowHeld = false;
     bool m_shadowWant = false;
     int m_shadowLogged = 0;
+    int m_shadowInputLogged = 0;
+    long m_shadowInputTicks = 0;
+    long m_shadowInputMismatches = 0;
     int m_selfTests = 0;
     bool m_selfTestDone = false;
     int m_tracesLogged = 0;

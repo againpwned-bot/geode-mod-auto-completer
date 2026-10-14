@@ -23,7 +23,7 @@ PlannerConfig PlannerConfig::forStyle(PlayStyle style, uint32_t seed) {
             // so the chosen tick sits in the exact middle of the safe window.
             config.scanStride = 1;
             config.windowCap = 32;
-            config.horizonMax = 90;
+            config.horizonMax = 120;
             config.tapLen = 3;
             config.regionBudget = 8000;
             break;
@@ -381,26 +381,6 @@ void Planner::stepFix() {
     int survival = this->evaluate(tick, decision, fix.deathTick);
     this->note(TraceEntry::Kind::Eval, tick, survival);
 
-    if (survival >= m_cfg.horizonMin && m_cfg.robust) {
-        // The same click a tick early or late must work too, so a small timing error in
-        // the real game can't kill, and the next obstacle keeps some room.
-        for (int neighbour : { tick - 1, tick + 1 }) {
-            if (neighbour < fix.lo || neighbour > fix.deathTick) {
-                survival = -1;
-                break;
-            }
-            bool const held = neighbour < static_cast<int>(m_bits.size()) && m_bits[neighbour];
-            if (held == current) {
-                Decision shifted = decision;
-                int const s = this->evaluate(neighbour, shifted, fix.deathTick);
-                if (s < m_cfg.horizonMin) {
-                    survival = -1;
-                    break;
-                }
-            }
-        }
-    }
-
     if (survival >= m_cfg.horizonMin) {
         fix.valid.push_back(Candidate{ tick, decision, survival });
         if (fix.firstValid < 0) {
@@ -411,6 +391,22 @@ void Planner::stepFix() {
     else if (fix.firstValid >= 0) {
         fix.invalidStreak += 1;
     }
+}
+
+bool Planner::robustAt(Candidate const& c) {
+    // A neighbour has to do about as well as the candidate itself: just outliving the old
+    // death by a few ticks could still mean landing on the next spike.
+    int const need = std::max(m_cfg.horizonMin, std::min(c.survival, m_cfg.horizonMax) - 3);
+    bool const current = c.tick < static_cast<int>(m_bits.size()) && m_bits[c.tick];
+    for (int neighbour : { c.tick - 1, c.tick + 1 }) {
+        if (neighbour < m_fix.lo || neighbour > m_fix.deathTick) return false;
+        bool const held = neighbour < static_cast<int>(m_bits.size()) && m_bits[neighbour];
+        if (held != current) continue;
+        int const survival = this->evaluate(neighbour, c.decision, m_fix.deathTick);
+        this->note(TraceEntry::Kind::Eval, neighbour, survival);
+        if (survival < need) return false;
+    }
+    return true;
 }
 
 bool Planner::canPressAt(int tick) const {
@@ -468,7 +464,7 @@ void Planner::finishFix() {
 
     // Every candidate that clears the obstacle comfortably is equally good; preferring
     // the one that survives longest would favour the edge of the window.
-    int const clear = std::min(best, std::max(m_cfg.clearTicks, m_cfg.horizonMin));
+    int const clear = best >= m_cfg.horizonMax ? best : std::min(best, std::max(m_cfg.clearTicks, m_cfg.horizonMin));
     std::vector<Candidate> top;
     std::vector<Candidate> rest;
     for (auto const& c : valid) {
@@ -525,8 +521,21 @@ void Planner::finishFix() {
     std::vector<Candidate> ordered = std::move(top);
     ordered.insert(ordered.end(), rest.begin(), rest.end());
 
-    Candidate chosen = ordered.front();
-    ordered.erase(ordered.begin());
+    auto pick = ordered.begin();
+    if (m_cfg.robust) {
+        // The click must also work a tick earlier and later, so a small timing error in
+        // the real game can't kill and the next obstacle keeps some room. Only the best
+        // candidates are checked, in order, to keep this cheap.
+        pick = std::find_if(ordered.begin(), ordered.end(), [this](Candidate const& c) {
+            return this->robustAt(c);
+        });
+        if (pick == ordered.end()) {
+            this->backtrack();
+            return;
+        }
+    }
+    Candidate chosen = *pick;
+    ordered.erase(pick);
 
     this->applyDecision(chosen.tick, chosen.decision);
     this->note(TraceEntry::Kind::Choose, chosen.tick);

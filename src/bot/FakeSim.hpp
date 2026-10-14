@@ -158,6 +158,10 @@ public:
 
     // Remembers an orb or pad before the hidden player may activate it.
     void noteObject(GameObject* object);
+    // Portals are applied by hand, never through the game layer: speed and size change
+    // the hidden player; mode, gravity, dual and teleport portals end the look-ahead (the
+    // real player gets there first and later checks continue from its new state).
+    void notePortal(GameObject* object);
 
     // Runs each recorded call once with marker values to see which inlined functions it
     // already contains. Leaves the hidden player as it was.
@@ -189,6 +193,7 @@ private:
         bool previousWant = false;
         int tick = 0;
         std::vector<Flags> flags;
+        std::vector<GameObject*> portals;
         bool used = false;
     };
 
@@ -210,6 +215,8 @@ private:
     bool m_inSlice = true;
     int m_cursor = -1;
 
+    std::vector<GameObject*> m_portalsUsed;
+    bool m_reachedGoal = false;
     std::vector<LogEntry> m_log;
     std::unordered_set<EnhancedGameObject*> m_logged;
     std::vector<Slot> m_slots;

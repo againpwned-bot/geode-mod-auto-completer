@@ -216,7 +216,10 @@ class $modify(ACBaseGameLayer, GJBaseGameLayer) {
             GameObject* object = (*objects)[i];
             if (!object) continue;
             bool activatable = false;
-            if (!simulatedType(object->m_objectType, activatable)) continue;
+            if (!simulatedType(object->m_objectType, activatable)) {
+                if (ctx.sim) ctx.sim->notePortal(object);
+                continue;
+            }
             if (activatable && ctx.sim) {
                 ctx.sim->noteObject(object);
             }

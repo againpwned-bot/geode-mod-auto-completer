@@ -78,7 +78,7 @@ struct PlannerConfig {
     int snapshotInterval = 16; // ticks between snapshots along the planned path
     int maxLookback = 180;     // how far before a death we look for a fix
     int horizonMin = 4;        // a fix must survive at least this many ticks past the old death
-    int horizonMax = 60;       // survival is measured up to this many ticks past the old death
+    int horizonMax = 110;      // survival is measured up to this many ticks past the old death (a jump lasts ~93)
     int scanStride = 2;        // tick step while scanning for a fix
     int windowCap = 24;        // how far the scan continues past the first working tick
     int tapLen = 5;            // ticks a tap is held in tap based modes
@@ -244,6 +244,8 @@ private:
     // only acts on the ground or on an orb, and a press in the air would just be a
     // buffered input whose effect depends on exact timing.
     bool canPressAt(int tick) const;
+    // Whether the candidate's click also works one tick earlier and later.
+    bool robustAt(Candidate const& c);
     void note(TraceEntry::Kind kind, int a, int b = 0) {
         if (m_trace.size() < 600) m_trace.push_back(TraceEntry{ kind, a, b });
     }

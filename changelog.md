@@ -1,3 +1,12 @@
+# v1.3.0
+- Fix: the bot clicked at the very edge of the safe timing window (Minimal had zero margin, and every style preferred jumps that survived a few ticks longer), so a single tick of error killed it on spikes and double spikes. Clicks now sit at least 3 ticks inside the window and must also work a tick earlier and later.
+- Fix: cube, robot, ball and spider no longer press in mid-air, where a press either does nothing or depends on exact landing timing.
+- Fix: jumps are judged until they land, not just 60 ticks past the obstacle.
+- If the previous plan leads into a dead end, the stretch is planned again from scratch before giving up.
+- Speed and size portals are simulated; mode and gravity portals end the look-ahead instead of predicting the wrong mode or gravity.
+- Diagnostics: the log reports tick checks on press/release ticks, a summary every 5 seconds and what the plan expected when the real player died.
+- New end-to-end test of the bot loop on GD-accurate physics with input timing errors (288 of 288 runs complete).
+
 # v1.2.3
 - Fix: a check that kept a jump from the previous plan could only move that jump earlier, never later, so the bot locked in early jumps and gave up ("No safe path found"). Stuck checks now plan the stretch again from scratch.
 - Fix: plans are indexed by the tick the game is about to run, even if GD advances its tick counter before the physics step.

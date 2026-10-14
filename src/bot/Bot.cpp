@@ -134,6 +134,9 @@ void Bot::onLevelInit(PlayLayer* layer) {
     m_model = PhysicsModel{};
     m_probe = InlineProbe{};
     m_shadowLogged = 0;
+    m_shadowInputLogged = 0;
+    m_shadowInputTicks = 0;
+    m_shadowInputMismatches = 0;
     m_selfTests = 0;
     m_tracesLogged = 0;
     m_diagnoses = 0;
@@ -683,20 +686,34 @@ void Bot::runShadow(PlayLayer* layer) {
     sim.run(1, [want](int, Mode) { return want; }, [](int, Sample const&) {});
     PlayerFix simulated;
     sim.captureState(simulated);
-    // Written by GD once per frame, not per tick.
+    // Written by GD once per frame, not per tick, and the real clock may already be set
+    // for the next step when this tick is closed.
     simulated.m_position = after.m_position;
+    simulated.m_totalTime = after.m_totalTime;
 
     size_t count = 0;
     std::string const fields = after.diff(simulated, 10, &count);
+    bool const inputChanged = m_shadowHeld != want;
     m_stats.shadowTicks += 1;
-    if (count == 0) return;
-    m_stats.shadowMismatches += 1;
-    if (m_shadowLogged < 60 || m_stats.shadowMismatches % 240 == 0) {
-        m_shadowLogged += 1;
+    if (inputChanged) m_shadowInputTicks += 1;
+    if (count > 0) {
+        m_stats.shadowMismatches += 1;
+        if (inputChanged) m_shadowInputMismatches += 1;
+        // Ticks where the bot pressed or released are the interesting ones.
+        bool const shouldLog = inputChanged ? m_shadowInputLogged < 40 : m_shadowLogged < 20;
+        if (shouldLog) {
+            (inputChanged ? m_shadowInputLogged : m_shadowLogged) += 1;
+            log::info(
+                "Tick check {} (input {}->{}, {}): {} field(s) differ (real/sim): {}",
+                m_tickBefore, m_shadowHeld ? 1 : 0, want ? 1 : 0, sim.lastDeath().valid ? "sim died" : "alive",
+                count, fields
+            );
+        }
+    }
+    if (m_stats.shadowTicks % 1200 == 0) {
         log::info(
-            "Tick check {} (input {}->{}, {}): {} field(s) differ (real/sim): {}",
-            m_tickBefore, m_shadowHeld ? 1 : 0, want ? 1 : 0, sim.lastDeath().valid ? "sim died" : "alive",
-            count, fields
+            "Tick checks: {} ticks, {} differ; press/release ticks: {}, {} differ",
+            m_stats.shadowTicks, m_stats.shadowMismatches, m_shadowInputTicks, m_shadowInputMismatches
         );
     }
 }
@@ -770,6 +787,27 @@ void Bot::logDeath(FakeSim const& sim) {
 void Bot::onRealDeath(PlayLayer* layer) {
     if (m_state != BotState::Playing) return;
     float const at = progressOf(layer, layer->m_player1 ? layer->m_player1->getPositionX() : 0.f);
+
+    // What the plan expected around the death, for the log.
+    if (layer->m_player1) {
+        unsigned const tick = m_tickBefore;
+        auto const pos = layer->m_player1->getPosition();
+        std::string presses;
+        int const from = std::max(0, static_cast<int>(tick) - 240);
+        for (int t = from; t <= static_cast<int>(tick) && t < static_cast<int>(m_inputs.size()); ++t) {
+            bool const now = m_inputs[t] != 0;
+            bool const before = t > 0 && m_inputs[t - 1] != 0;
+            if (now != before) presses += fmt::format(" {}{}", now ? "+" : "-", t);
+        }
+        std::string expected = "none";
+        if (tick < m_samples.size() && static_cast<int>(tick) < m_planEnd) {
+            expected = fmt::format("({:.1f},{:.1f})", m_samples[tick].x, m_samples[tick].y);
+        }
+        log::info(
+            "Real player died at tick {} at ({:.1f},{:.1f}); plan expected {}; plan ends at {}; inputs before:{}",
+            tick, pos.x, pos.y, expected, m_planEnd, presses.empty() ? " none" : presses
+        );
+    }
     m_stats.deaths += 1;
     m_state = BotState::Died;
     this->setStatus(fmt::format("Died at {}", percent(at)));

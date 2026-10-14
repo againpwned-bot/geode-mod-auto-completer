@@ -347,6 +347,28 @@ PilotResult pilot(Level const& level, PlayStyle style, int jitterPercent, uint32
                 while (planner->step() == Planner::Status::Running) {}
             }
             if (planner->status() == Planner::Status::Stuck) r.stuckChecks += 1;
+            if (char const* from = std::getenv("GD_TRACE_FROM")) {
+                int const lo = std::atoi(from);
+                if (t0 >= lo && t0 <= lo + 150) {
+                    std::printf("    check t0=%d seeded=%d status=%s robust=%d presses:", t0, seeded ? 1 : 0,
+                        planner->status() == Planner::Status::Completed ? "done" : "stuck", config.robust ? 1 : 0);
+                    auto const& bits = planner->inputs();
+                    for (size_t k = 1; k < bits.size(); ++k) if (bits[k] && !bits[k - 1]) std::printf(" %d", t0 + static_cast<int>(k));
+                    std::printf("\n");
+                    using Kind = Planner::TraceEntry::Kind;
+                    std::printf("      trace:");
+                    for (auto const& e : planner->trace()) {
+                        switch (e.kind) {
+                            case Kind::Fix: std::printf(" | D%d lo%d:", t0 + e.a, t0 + e.b); break;
+                            case Kind::Eval: std::printf(" %d:%d", t0 + e.a, e.b); break;
+                            case Kind::Choose: std::printf(" ->%d", t0 + e.a); break;
+                            case Kind::Backtrack: std::printf(" undo%d", t0 + e.a); break;
+                            case Kind::GiveUp: std::printf(" giveup"); break;
+                        }
+                    }
+                    std::printf("\n");
+                }
+            }
 
             int end = planner->status() == Planner::Status::Completed ? planner->endTick() : planner->bestFrontier();
             end = std::min<int>(end, static_cast<int>(std::min(planner->inputs().size(), planner->samples().size())));
@@ -361,6 +383,13 @@ PilotResult pilot(Level const& level, PlayStyle style, int jitterPercent, uint32
             }
             if (end > from || t0 + end > planEnd) planEnd = t0 + std::max(end, from);
             planner.reset();
+            if (std::getenv("GD_COST")) {
+                static long worst = 0, sum = 0, n = 0;
+                worst = std::max(worst, sim.ticks());
+                sum += sim.ticks();
+                n += 1;
+                if (n % 200 == 0) std::printf("    cost: %ld checks, avg %ld sim ticks, worst %ld\n", n, sum / n, worst);
+            }
             if (sim.liveSnapshots() != 0) {
                 std::printf("  FAIL: leaked snapshots\n");
                 r.outcome = Event::Died;
