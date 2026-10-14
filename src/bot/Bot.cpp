@@ -45,7 +45,7 @@ char const* Bot::stateName() const {
 }
 
 unsigned Bot::currentTick() const {
-    return m_layer ? m_layer->m_gameState.m_currentProgress : 0;
+    return m_stepIndex;
 }
 
 void Bot::setStatus(std::string status) {
@@ -116,6 +116,8 @@ void Bot::resetAttempt() {
     m_forceCheck = false;
     m_desyncFlagged = false;
     m_tickOpen = false;
+    m_stepIndex = 0;
+    m_seenStep = false;
     m_shadowValid = false;
     m_selfTestDone = false;
     m_usedThisAttempt = false;
@@ -140,7 +142,6 @@ void Bot::onLevelInit(PlayLayer* layer) {
     m_selfTests = 0;
     m_tracesLogged = 0;
     m_diagnoses = 0;
-    m_tickOffset = 0;
     m_simTicks = 0;
     m_simSeconds = 0.0;
     TickRecorder::get().reset();
@@ -195,8 +196,6 @@ void Bot::onReset(PlayLayer* layer) {
 
 void Bot::onFrame(PlayLayer* layer) {
     m_layer = layer;
-    m_frameProgress = layer->m_gameState.m_currentProgress;
-    m_firstStep = true;
 
     if (!settings::enabled() || layer->m_isPracticeMode) {
         if (m_state != BotState::Off) {
@@ -245,8 +244,8 @@ void Bot::onFrame(PlayLayer* layer) {
         this->runSelfTest(layer);
     }
 
-    // Index of the tick the next physics step runs (see beforeTick).
-    unsigned const now = layer->m_gameState.m_currentProgress + m_tickOffset;
+    // Index of the physics step that runs next (see beforeTick).
+    unsigned const now = m_stepIndex;
     auto const budget = std::chrono::microseconds(std::clamp<int64_t>(settings::liveBudget(), 1, 30) * 1000);
     auto const deadline = std::chrono::steady_clock::now() + budget;
 
@@ -579,30 +578,28 @@ void Bot::addSimCost(FakeSim const& sim) {
 }
 
 void Bot::beforeTick(PlayLayer* layer) {
+    // GD 2.2081 advances m_currentProgress by 2 per physics step, so the bot counts steps
+    // itself: plans, samples and simulations are all indexed by physics step. A second
+    // processCommands call for the same step (a half step) isn't a new step.
     unsigned const progress = layer->m_gameState.m_currentProgress;
-    if (m_firstStep) {
-        // If GD bumps its tick counter before processCommands, the tick about to run is
-        // not the one the frame started with; plans are indexed by the running tick.
-        m_firstStep = false;
-        int const offset = std::clamp(static_cast<int>(progress) - static_cast<int>(m_frameProgress), 0, 2);
-        if (offset != m_tickOffset) {
-            log::info("Tick counter offset at the first step: {}", offset);
-            m_tickOffset = offset;
-        }
+    if (m_seenStep && progress == m_lastProgress) return;
+    if (m_seenStep && !m_strideLogged && progress > m_lastProgress) {
+        m_strideLogged = true;
+        log::info("GD tick counter advances by {} per physics step", progress - m_lastProgress);
     }
-    // A new step starting means the previous one is fully done. A second call for the same
-    // tick (half step) isn't a new tick.
-    if (!m_tickOpen || progress != m_tickBefore) {
-        this->closeTick(layer);
-    }
-    m_tickBefore = progress;
+    m_seenStep = true;
+    m_lastProgress = progress;
+
+    // A new step starting means the previous one is fully done.
+    this->closeTick(layer);
+    m_tickBefore = m_stepIndex;
+    m_stepIndex += 1;
     if (m_state != BotState::Playing) return;
-    bool const fresh = !m_tickOpen;
     m_tickOpen = true;
 
     bool const want = static_cast<int>(m_tickBefore) < m_planEnd &&
         m_tickBefore < m_inputs.size() && m_inputs[m_tickBefore] != 0;
-    if (fresh && m_probe.done && TickRecorder::get().ready() && layer->m_player1) {
+    if (m_probe.done && TickRecorder::get().ready() && layer->m_player1) {
         // Remember the state before this tick so it can be replayed on the hidden player.
         m_shadowPre.capture(layer->m_player1);
         m_shadowHeld = m_appliedHold;

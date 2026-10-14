@@ -93,7 +93,7 @@ void PathViewer::update(PlayLayer* layer) {
         return;
     }
 
-    unsigned const tick = layer->m_gameState.m_currentProgress;
+    unsigned const tick = bot.currentTick();
     if (!m_drawnFull && revision == m_drawnRevision && tick == m_drawnTick) return;
 
     int const ahead = static_cast<int>(std::clamp(settings::pathLookahead(), 0.1, 30.0) * kTicksPerSecond);

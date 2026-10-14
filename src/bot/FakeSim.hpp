@@ -78,7 +78,6 @@ private:
     bool m_active = false;
     int m_step = 0;
     int m_depth = 0;
-    unsigned m_frameProgress = 0;
     unsigned m_stepProgress = 0;
     bool m_strong = false;
     unsigned m_revision = 0;

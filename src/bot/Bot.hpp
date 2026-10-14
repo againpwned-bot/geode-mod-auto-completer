@@ -124,7 +124,7 @@ private:
     BotState m_state = BotState::Off;
     std::string m_status = "Not in a level";
 
-    // plan, indexed by the real game's tick (m_gameState.m_currentProgress)
+    // plan, indexed by physics step since the attempt started (m_stepIndex)
     std::vector<uint8_t> m_inputs;
     std::vector<Sample> m_samples;
     int m_planEnd = 0;
@@ -162,10 +162,11 @@ private:
     int m_tracesLogged = 0;
     int m_diagnoses = 0;
 
-    // GD's tick counter as seen before the frame vs at its first physics step.
-    unsigned m_frameProgress = 0;
-    bool m_firstStep = false;
-    int m_tickOffset = 0;
+    // Physics steps since the attempt started (GD's own counter moves 2 per step).
+    unsigned m_stepIndex = 0;
+    unsigned m_lastProgress = 0;
+    bool m_seenStep = false;
+    bool m_strideLogged = false;
     bool m_usedThisAttempt = false;
     bool m_requestRestart = false;
     uint32_t m_attempt = 0;

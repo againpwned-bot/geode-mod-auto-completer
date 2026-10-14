@@ -1,3 +1,6 @@
+# v1.3.1
+- Fix: the bot jumped too early because it indexed its plan by GD's tick counter, which in 2.2081 advances by 2 per physics step. Plans were played back at double speed, so every click came early and the real player constantly drifted from the prediction. The bot now counts physics steps itself.
+
 # v1.3.0
 - Fix: the bot clicked at the very edge of the safe timing window (Minimal had zero margin, and every style preferred jumps that survived a few ticks longer), so a single tick of error killed it on spikes and double spikes. Clicks now sit at least 3 ticks inside the window and must also work a tick earlier and later.
 - Fix: cube, robot, ball and spider no longer press in mid-air, where a press either does nothing or depends on exact landing timing.

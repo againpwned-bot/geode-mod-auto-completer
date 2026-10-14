@@ -39,10 +39,9 @@ TickRecorder& TickRecorder::get() {
     return recorder;
 }
 
-void TickRecorder::beginFrame(PlayerObject* player, unsigned progress) {
+void TickRecorder::beginFrame(PlayerObject* player, unsigned) {
     m_player = player;
     m_active = player != nullptr;
-    m_frameProgress = progress;
     m_step = 0;
     m_depth = 0;
     m_segment.clear();
@@ -62,15 +61,7 @@ void TickRecorder::stepStarted(unsigned progress) {
     m_lastTime = now;
 }
 
-void TickRecorder::endFrame(unsigned progress) {
-    // Safety net: if processCommands ever ran once per frame instead of once per step,
-    // the segment holds several steps; keep one step's worth.
-    int const ticks = progress > m_frameProgress ? static_cast<int>(progress - m_frameProgress) : 0;
-    if (m_active && m_step == 1 && ticks >= 2 && !m_segment.empty() &&
-        m_segment.size() % static_cast<size_t>(ticks) == 0) {
-        m_segment.resize(m_segment.size() / static_cast<size_t>(ticks));
-        m_step = ticks;
-    }
+void TickRecorder::endFrame(unsigned) {
     if (m_active && m_step >= 1) {
         bool const moved = std::any_of(m_segment.begin(), m_segment.end(), [](TickOp const& op) {
             return op.kind == TickOp::Kind::Update;
