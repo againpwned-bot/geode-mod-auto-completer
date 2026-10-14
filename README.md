@@ -36,9 +36,10 @@ To run the planner tests:
 ```sh
 g++ -std=c++20 -O2 -I src tests/planner_test.cpp src/planner/Planner.cpp -o planner_test && ./planner_test
 g++ -std=c++20 -O2 -I src tests/gd_pilot_test.cpp src/planner/Planner.cpp -o gd_pilot_test && ./gd_pilot_test
+g++ -std=c++20 -O2 -I src tests/motion_test.cpp -o motion_test && ./motion_test
 ```
 
 ## Limitations
 - Classic levels only (no platformer or 2-player yet).
 - After a mode portal the first plan only starts once the real player is through it, and flying modes use the game's current floor and ceiling.
-- Moving objects are predicted by extending their current speed in a straight line. Eased, rotating or toggled objects can still surprise it; re-checking every 16 ticks corrects most of that.
+- Moving objects: groups moved by move triggers are placed exactly (offset, duration, easing, lock to player), including move triggers the player starts by passing them, directly or through a spawn trigger. Anything else that moves (follow, rotate, keyframe and area triggers, move-to-target, chained or remapped spawns, touch or collision triggers) is extrapolated from its current speed, and re-checking every 16 ticks corrects most of the rest.

@@ -10,7 +10,7 @@ A pathfinding bot for Geometry Dash that plays levels for you in real time, with
 - **Mega Hack style menu**: press **Tab** (configurable in the mod settings).
 
 ## Safe mode
-While the bot is active, safe mode is always on. No progress, stars, coins or leaderboard submissions are saved, and the bot is disabled on editor levels so it can't be used to verify a level.
+Safe mode is on by default: while the bot plays, no progress, stars, coins or leaderboard submissions are saved. You can switch it off in the menu or the mod settings. The bot is always disabled on editor levels, so it can't be used to verify a level.
 
 ## Limitations
 - Classic levels only. Platformer and 2-player levels are not supported yet.

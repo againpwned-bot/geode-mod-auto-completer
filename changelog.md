@@ -1,3 +1,12 @@
+# v1.3.4
+- Moving objects follow their move triggers: the bot reads each move as GD starts it (offset, duration, easing, lock to player or camera), so it knows where a moving hazard or platform stops instead of assuming it keeps going.
+- Traps that haven't started moving yet: the simulation starts the move triggers the player will pass, directly or through a spawn trigger with its delay, so the bot sees them coming.
+- Hazards moved by triggers are checked even while they are still far from the player.
+- The bot measures how far groups really move per unit of trigger offset and when position triggers fire, and corrects itself (both are logged).
+- Fix: the simulation applied speed portals one step before the real game.
+- Safe mode is now a switch (menu and mod settings). It stays on by default.
+- Death logs list the killer's groups and the moves running on them.
+
 # v1.3.3
 - Fix: moving objects (move triggers) were frozen in place in the simulation, so on harder levels the bot only noticed a moving spike or block a few ticks before hitting it, too late to react ("give up", then death). The bot now measures how fast every nearby and on-screen object moves and the hidden player sees each one where it will be at that moment, including moving hazards that are still far away.
 - The log's 5 second summary shows how many moving objects the bot is tracking.

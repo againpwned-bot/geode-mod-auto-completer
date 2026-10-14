@@ -3,6 +3,7 @@
 #include <Geode/Geode.hpp>
 
 #include "../planner/Planner.hpp"
+#include "ObjectTracker.hpp"
 #include "PlayerState.hpp"
 
 #include <string>
@@ -86,60 +87,6 @@ private:
     double m_timeStep = 0.0;
     std::vector<TickOp> m_segment;
     std::vector<TickOp> m_template;
-};
-
-// Tracks how fast objects move (move triggers, followers, ...), so the hidden player sees
-// where a moving hazard or platform will be instead of where it is right now. GD moves
-// objects early in each physics step, before the player's collision checks, so between
-// steps every object sits where that step's collisions saw it; velocities come from those
-// positions on nearby steps and are extrapolated linearly.
-class ObjectTracker {
-public:
-    static ObjectTracker& get();
-
-    // Physics step whose object positions the level shows from now on (-1: level start).
-    void setWorldStep(int step);
-    int worldStep() const { return m_worldStep; }
-
-    // Records where `object` is in the current world step.
-    void observe(GameObject* object);
-    // Observes every object in the sections the level currently shows, so objects that are
-    // still far from the player are already known to move when they matter.
-    void observeVisible(GJBaseGameLayer* layer);
-    // Objects that moved on the last steps they were seen.
-    std::vector<GameObject*> const& movingObjects() const { return m_moving; }
-
-    struct Moved {
-        GameObject* object = nullptr;
-        double positionX = 0.0;
-        double positionY = 0.0;
-        cocos2d::CCPoint node;
-        cocos2d::CCPoint last;
-    };
-    // Moves `object` to where it is predicted to be during physics step `step`, recording how
-    // to undo it. Objects that aren't moving are left alone.
-    void predict(GameObject* object, int step, std::vector<Moved>& moved) const;
-    static void restore(std::vector<Moved>& moved);
-
-    void reset();
-    size_t size() const { return m_tracks.size(); }
-    // Objects seen moving lately.
-    size_t movingCount() const;
-
-private:
-    struct Track {
-        double x = 0.0;
-        double y = 0.0;
-        double vx = 0.0;
-        double vy = 0.0;
-        int step = 0;
-        bool listed = false;
-    };
-    std::unordered_map<GameObject*, Track> m_tracks;
-    std::vector<GameObject*> m_moving;
-    int m_worldStep = -1;
-    int m_lastPrune = 0;
-    bool m_loggedSections = false;
 };
 
 class FakeSim;
@@ -232,8 +179,8 @@ public:
     // Real physics step the tick being simulated corresponds to.
     int absoluteStep() const { return m_baseStep + m_tick; }
     // Moves `object` to where it will be during the tick being simulated if it is moving;
-    // undone when the tick ends.
-    void placeObject(GameObject* object);
+    // undone when the tick ends. False if it was already placed this tick.
+    bool placeObject(GameObject* object);
 
     long ticksRun() const { return m_ticksRun; }
     double secondsRun() const { return m_secondsRun; }
@@ -255,6 +202,8 @@ private:
         int tick = 0;
         std::vector<Flags> flags;
         std::vector<GameObject*> portals;
+        std::vector<MoveCommand> moves;
+        float pendingSpeed = 0.f;
         bool used = false;
     };
 
@@ -267,6 +216,9 @@ private:
     // Checks moving hazards that will be near the hidden player but sit in sections its own
     // collision check doesn't look at yet.
     void collideMovingHazards(float dt);
+    ObjectTracker::Context placeContext() const;
+    // Starts the moves of position triggers the hidden player passed this tick.
+    void passTriggers();
 
     PlayLayer* m_layer = nullptr;
     PlayerObject* m_fake = nullptr;
@@ -274,6 +226,13 @@ private:
     double m_timeStep = 0.0;
     int m_baseStep = 0;
     std::vector<ObjectTracker::Moved> m_moved;
+    // Moves started by triggers the hidden player passed, and how far it has checked.
+    std::vector<MoveCommand> m_moves;
+    double m_triggerX = 0.0;
+    uint64_t m_stamp = 0;
+    // Speed portal reached this tick, applied next tick.
+    float m_pendingSpeed = 0.f;
+    cocos2d::CCRect m_tickStartRect;
     cocos2d::CCPoint m_killerPosition;
     PhysicsModel m_model;
     bool m_hasRingReset = false;

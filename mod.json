@@ -5,7 +5,7 @@
 	},
 	"id": "againpwned.auto-completer",
 	"name": "Auto Completer",
-	"version": "v1.3.3",
+	"version": "v1.3.4",
 	"developer": "againpwned",
 	"description": "Pathfinding bot that plays levels for you in real time, with play styles, a path viewer and a Mega Hack style menu.",
 	"tags": [
@@ -25,7 +25,13 @@
 		"enabled": {
 			"type": "bool",
 			"name": "Enable Auto Completer",
-			"description": "Plan a safe route through every level you open and play it automatically. Safe mode is always on while the bot is active: no progress, stars or leaderboard submissions are saved.",
+			"description": "Plan a safe route through every level you open and play it automatically.",
+			"default": true
+		},
+		"safe-mode": {
+			"type": "bool",
+			"name": "Safe Mode",
+			"description": "While the bot plays, nothing is saved: no progress, stars, coins or leaderboard submissions. Turn it off only if you want bot runs to count like normal ones.",
 			"default": true
 		},
 		"play-style": {

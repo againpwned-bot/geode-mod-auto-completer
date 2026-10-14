@@ -136,165 +136,6 @@ void TickRecorder::reset() {
     m_revision += 1;
 }
 
-ObjectTracker& ObjectTracker::get() {
-    static ObjectTracker tracker;
-    return tracker;
-}
-
-void ObjectTracker::setWorldStep(int step) {
-    m_worldStep = step;
-    // Drop objects that stopped, or weren't seen lately, from the moving list.
-    m_moving.erase(
-        std::remove_if(
-            m_moving.begin(), m_moving.end(),
-            [this](GameObject* object) {
-                auto const it = m_tracks.find(object);
-                if (it == m_tracks.end()) return true;
-                Track& track = it->second;
-                bool const keep = (track.vx != 0.0 || track.vy != 0.0) && track.step + 16 >= m_worldStep;
-                if (!keep) track.listed = false;
-                return !keep;
-            }
-        ),
-        m_moving.end()
-    );
-}
-
-void ObjectTracker::observeVisible(GJBaseGameLayer* layer) {
-    if (!layer) return;
-    int const columns = static_cast<int>(layer->m_sections.size());
-    int left = layer->m_leftSectionIndex;
-    int right = layer->m_rightSectionIndex;
-    int bottom = layer->m_bottomSectionIndex;
-    int top = layer->m_topSectionIndex;
-    if (!m_loggedSections) {
-        m_loggedSections = true;
-        log::info("Visible sections: x {}..{} of {}, y {}..{}", left, right, columns, bottom, top);
-    }
-    // Look a little past the screen edges; skip anything that doesn't look like a window.
-    left = std::max(left - 1, 0);
-    right = std::min(right + 1, columns - 1);
-    bottom = std::max(bottom - 1, 0);
-    top += 1;
-    if (right < left || top < bottom || right - left > 40 || top - bottom > 40) return;
-    if (static_cast<int>(layer->m_sectionSizes.size()) < columns) return;
-
-    for (int x = left; x <= right; ++x) {
-        auto* column = layer->m_sections[x];
-        auto* sizes = layer->m_sectionSizes[x];
-        if (!column || !sizes) continue;
-        int const rows = std::min(static_cast<int>(column->size()), static_cast<int>(sizes->size()));
-        for (int y = bottom; y <= std::min(top, rows - 1); ++y) {
-            auto* objects = (*column)[y];
-            if (!objects) continue;
-            int const count = std::min((*sizes)[y], static_cast<int>(objects->size()));
-            for (int i = 0; i < count; ++i) {
-                this->observe((*objects)[i]);
-            }
-        }
-    }
-}
-
-void ObjectTracker::observe(GameObject* object) {
-    if (!object) return;
-    auto [it, inserted] = m_tracks.try_emplace(object);
-    Track& track = it->second;
-    if (!inserted) {
-        if (track.step == m_worldStep) return;
-        int const gap = m_worldStep - track.step;
-        track.vx = 0.0;
-        track.vy = 0.0;
-        if (gap >= 1 && gap <= 16) {
-            double const vx = (object->m_positionX - track.x) / gap;
-            double const vy = (object->m_positionY - track.y) / gap;
-            // Jumps (teleports, toggled spawns) aren't motion.
-            if (std::abs(vx) < 30.0 && std::abs(vy) < 30.0) {
-                track.vx = vx;
-                track.vy = vy;
-            }
-        }
-    }
-    if ((track.vx != 0.0 || track.vy != 0.0) && !track.listed) {
-        track.listed = true;
-        m_moving.push_back(object);
-    }
-    track.x = object->m_positionX;
-    track.y = object->m_positionY;
-    track.step = m_worldStep;
-
-    // Forget objects not seen for a while.
-    if (m_worldStep > m_lastPrune + 2400) {
-        m_lastPrune = m_worldStep;
-        for (auto i = m_tracks.begin(); i != m_tracks.end();) {
-            // Moving objects stay until the moving list lets go of them.
-            if (i->second.step + 600 < m_worldStep && !i->second.listed) i = m_tracks.erase(i);
-            else ++i;
-        }
-    }
-}
-
-void ObjectTracker::predict(GameObject* object, int step, std::vector<Moved>& moved) const {
-    auto const it = m_tracks.find(object);
-    if (it == m_tracks.end()) return;
-    Track const& track = it->second;
-    if (track.vx == 0.0 && track.vy == 0.0) return;
-    // Only extrapolate from where the object is right now.
-    if (track.step != m_worldStep || step <= track.step) return;
-
-    // Far out the guess is worthless; hold it there.
-    double const ahead = std::min(step - track.step, 240);
-    double const dx = track.x + track.vx * ahead - object->m_positionX;
-    double const dy = track.y + track.vy * ahead - object->m_positionY;
-    if (std::abs(dx) < 1e-4 && std::abs(dy) < 1e-4) return;
-
-    Moved undo;
-    undo.object = object;
-    undo.positionX = object->m_positionX;
-    undo.positionY = object->m_positionY;
-    undo.node = object->m_obPosition;
-    undo.last = object->m_lastPosition;
-    moved.push_back(undo);
-
-    // Shift GD's own position, the node position and the previous position alike, so the
-    // object keeps its per step motion (platforms carry the player the same way).
-    float const fx = static_cast<float>(dx);
-    float const fy = static_cast<float>(dy);
-    object->m_positionX = undo.positionX + dx;
-    object->m_positionY = undo.positionY + dy;
-    object->m_obPosition = cocos2d::CCPoint(undo.node.x + fx, undo.node.y + fy);
-    object->m_lastPosition = cocos2d::CCPoint(undo.last.x + fx, undo.last.y + fy);
-    object->m_isObjectRectDirty = true;
-    object->m_isOrientedBoxDirty = true;
-}
-
-void ObjectTracker::restore(std::vector<Moved>& moved) {
-    for (auto it = moved.rbegin(); it != moved.rend(); ++it) {
-        GameObject* object = it->object;
-        object->m_positionX = it->positionX;
-        object->m_positionY = it->positionY;
-        object->m_obPosition = it->node;
-        object->m_lastPosition = it->last;
-        object->m_isObjectRectDirty = true;
-        object->m_isOrientedBoxDirty = true;
-    }
-    moved.clear();
-}
-
-size_t ObjectTracker::movingCount() const {
-    size_t count = 0;
-    for (auto const& [object, track] : m_tracks) {
-        if ((track.vx != 0.0 || track.vy != 0.0) && track.step + 8 >= m_worldStep) count += 1;
-    }
-    return count;
-}
-
-void ObjectTracker::reset() {
-    m_tracks.clear();
-    m_moving.clear();
-    m_worldStep = -1;
-    m_lastPrune = 0;
-}
-
 FakeContext& fakeContext() {
     static FakeContext context;
     return context;
@@ -363,6 +204,7 @@ FakeSim::FakeSim(
     m_fake->m_ignoreDamage = false;
     m_fake->m_playEffects = false;
     m_fake->setVisible(false);
+    m_triggerX = m_fake->getPositionX();
 }
 
 FakeSim::~FakeSim() {
@@ -467,7 +309,15 @@ void FakeSim::notePortal(GameObject* object) {
 
     switch (kind) {
         case PortalKind::Speed:
-            m_fake->m_playerSpeed = speed;
+            // GD changes speed on the step after the player first reaches the portal, after
+            // that step's move. If the player already overlapped it before this step's move,
+            // that step is now.
+            if (m_tickStartRect.intersectsRect(object->getObjectRect())) {
+                m_fake->m_playerSpeed = speed;
+            }
+            else {
+                m_pendingSpeed = speed;
+            }
             break;
         case PortalKind::Size: {
             bool const mini = object->m_objectType == GameObjectType::MiniSizePortal;
@@ -529,6 +379,8 @@ int FakeSim::save() {
     slot.previousWant = m_previousWant;
     slot.tick = m_tick;
     slot.portals = m_portalsUsed;
+    slot.moves = m_moves;
+    slot.pendingSpeed = m_pendingSpeed;
     slot.flags.reserve(m_log.size());
     for (auto const& entry : m_log) {
         slot.flags.push_back(read(entry.object));
@@ -564,6 +416,9 @@ void FakeSim::load(int handle) {
     m_previousWant = slot.previousWant;
     m_tick = slot.tick;
     m_portalsUsed = slot.portals;
+    m_moves = slot.moves;
+    m_pendingSpeed = slot.pendingSpeed;
+    m_triggerX = m_fake->getPositionX();
     m_reachedGoal = false;
     for (size_t i = 0; i < m_log.size(); ++i) {
         write(m_log[i].object, i < slot.flags.size() ? slot.flags[i] : m_log[i].base);
@@ -600,54 +455,109 @@ void FakeSim::runOp(TickOp const& op) {
     }
 }
 
-void FakeSim::placeObject(GameObject* object) {
-    for (auto const& moved : m_moved) {
-        if (moved.object == object) return;
+ObjectTracker::Context FakeSim::placeContext() const {
+    ObjectTracker::Context context;
+    context.step = this->absoluteStep();
+    context.extra = &m_moves;
+    if (auto* real = m_layer ? m_layer->m_player1 : nullptr) {
+        // The real player sits where it was at the world step.
+        context.playerDx = m_fake->getPositionX() - real->getPositionX();
+        context.playerDy = m_fake->getPositionY() - real->getPositionY();
     }
+    return context;
+}
+
+bool FakeSim::placeObject(GameObject* object) {
     auto& tracker = ObjectTracker::get();
-    tracker.observe(object);
-    tracker.predict(object, this->absoluteStep(), m_moved);
+    auto& track = tracker.observe(object);
+    if (track.placed == m_stamp) return false;
+    track.placed = m_stamp;
+    tracker.predict(object, track, this->placeContext(), m_moved);
+    return true;
 }
 
 void FakeSim::collideMovingHazards(float dt) {
     auto& tracker = ObjectTracker::get();
-    if (this->absoluteStep() <= tracker.worldStep() || tracker.movingObjects().empty()) return;
+    int const step = this->absoluteStep();
+    int const world = tracker.worldStep();
+    if (step <= world) return;
 
     auto const center = m_fake->getPosition();
+    // Nothing a move can reach from farther away needs a look.
+    auto const context = this->placeContext();
+    double range = std::abs(context.playerDx) + std::abs(context.playerDy);
+    double const scale = std::max(1.0, tracker.offsetScale());
+    auto addRange = [&](MoveCommand const& command) {
+        if (ObjectTracker::movesDuring(command, world, step)) {
+            range += (std::abs(command.dx) + std::abs(command.dy)) * scale;
+        }
+    };
+    for (auto const& command : tracker.commands()) addRange(command);
+    for (auto const& command : m_moves) addRange(command);
+
     gd::vector<GameObject*> nearby;
-    // By index: placing an object may add to the list.
-    auto const& moving = tracker.movingObjects();
-    for (size_t i = 0; i < moving.size(); ++i) {
-        GameObject* object = moving[i];
-        auto const type = object->m_objectType;
-        if (type != GameObjectType::Hazard && type != GameObjectType::AnimatedHazard) continue;
-        bool placed = false;
-        for (auto const& moved : m_moved) {
-            if (moved.object == object) {
-                placed = true;
-                break;
-            }
+    auto consider = [&](GameObject* object, bool farCheck) {
+        if (object->m_objectType != GameObjectType::Hazard && object->m_objectType != GameObjectType::AnimatedHazard) {
+            return;
+        }
+        float const reach = 90.f + object->getObjectRadius();
+        if (farCheck && (std::abs(object->m_positionX - center.x) > reach + range + 300.0 ||
+                         std::abs(object->m_positionY - center.y) > reach + range + 300.0)) {
+            return;
         }
         // Already checked this tick at its predicted place.
-        if (placed) continue;
-        this->placeObject(object);
-        float const reach = 90.f + object->getObjectRadius();
+        if (!this->placeObject(object)) return;
         if (std::abs(object->m_positionX - center.x) < reach && std::abs(object->m_positionY - center.y) < reach) {
             nearby.push_back(object);
         }
+    };
+
+    // By index: placing an object may add to the list.
+    auto const& moving = tracker.movingObjects();
+    for (size_t i = 0; i < moving.size(); ++i) {
+        consider(moving[i], false);
     }
+    // Hazards of groups that triggers are moving.
+    std::vector<int> groups;
+    auto addGroup = [&](MoveCommand const& command) {
+        if (!ObjectTracker::movesDuring(command, world, step)) return;
+        if (std::find(groups.begin(), groups.end(), command.group) != groups.end()) return;
+        groups.push_back(command.group);
+    };
+    for (auto const& command : tracker.commands()) addGroup(command);
+    for (auto const& command : m_moves) addGroup(command);
+    for (int group : groups) {
+        for (auto* object : tracker.groupHazards(m_layer, group)) consider(object, true);
+    }
+
     if (!nearby.empty()) {
         // Goes through the same hook as the regular check.
         m_layer->collisionCheckObjects(m_fake, &nearby, static_cast<int>(nearby.size()), dt);
     }
 }
 
+void FakeSim::passTriggers() {
+    double const x = m_fake->getPositionX();
+    if (x <= m_triggerX) return;
+    auto& tracker = ObjectTracker::get();
+    // The real game starts the moves of triggers the real player passes.
+    if (this->absoluteStep() > tracker.worldStep()) {
+        tracker.movesBetween(m_layer, m_triggerX, x, this->absoluteStep(), m_moves);
+    }
+    m_triggerX = x;
+}
+
 void FakeSim::stepPhysics() {
+    static uint64_t ticks = 0;
+    m_stamp = ++ticks;
     this->stepPlayer();
     auto& ctx = fakeContext();
     if (ctx.died && ctx.killer) {
         // Where the killer was in this tick, before moved objects go back.
         m_killerPosition = ccp(ctx.killer->m_positionX, ctx.killer->m_positionY);
+    }
+    if (!ctx.died) {
+        this->passTriggers();
     }
     ObjectTracker::restore(m_moved);
 }
@@ -665,12 +575,17 @@ void FakeSim::stepPlayer() {
     if (m_model.stateVars == Place::Start) player->updateStateVariables();
     // GD clears the collision log right after resetting touched rings.
     if (m_model.collisionLog && !m_hasRingReset) player->resetCollisionLog(false);
+    m_tickStartRect = player->getObjectRect();
 
     for (auto const& op : m_ops) {
         if (op.kind == TickOp::Kind::Collide && m_model.preCollision) {
             player->preCollision();
         }
         this->runOp(op);
+        if (op.kind == TickOp::Kind::Update && m_pendingSpeed > 0.f) {
+            player->m_playerSpeed = m_pendingSpeed;
+            m_pendingSpeed = 0.f;
+        }
         if (op.kind == TickOp::Kind::ResetRings && m_model.collisionLog) {
             player->resetCollisionLog(false);
         }
@@ -713,6 +628,8 @@ InlineProbe FakeSim::probeInlines() {
         player->m_lastCollisionBottom = 13579;        // resetCollisionLog(false)
         player->m_unk50C = 24680;
 
+        static uint64_t probes = 0;
+        m_stamp = ~++probes;
         this->runOp(op);
         ObjectTracker::restore(m_moved);
 

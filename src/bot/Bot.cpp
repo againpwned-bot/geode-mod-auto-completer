@@ -87,6 +87,7 @@ bool Bot::shouldBlockUserInput() const {
 }
 
 bool Bot::safeModeActive() const {
+    if (!settings::safeMode()) return false;
     if (m_usedThisAttempt) return true;
     if (!m_layer || !settings::enabled()) return false;
     return m_state == BotState::Playing || m_state == BotState::Finished || m_state == BotState::Died;
@@ -118,7 +119,7 @@ void Bot::resetAttempt() {
     m_tickOpen = false;
     m_stepIndex = 0;
     m_seenStep = false;
-    ObjectTracker::get().reset();
+    ObjectTracker::get().resetAttempt();
     m_shadowValid = false;
     m_deathPending = false;
     m_selfTestDone = false;
@@ -130,6 +131,7 @@ void Bot::resetAttempt() {
 
 void Bot::onLevelInit(PlayLayer* layer) {
     this->resetAttempt();
+    ObjectTracker::get().resetLevel();
     m_layer = layer;
     m_appliedHold = false;
     m_requestRestart = false;
@@ -166,6 +168,7 @@ void Bot::onLevelInit(PlayLayer* layer) {
 void Bot::onLevelQuit(PlayLayer* layer) {
     if (layer != m_layer) return;
     this->resetAttempt();
+    ObjectTracker::get().resetLevel();
     m_layer = nullptr;
     m_appliedHold = false;
     m_state = BotState::Off;
@@ -624,7 +627,9 @@ void Bot::beforeTick(PlayLayer* layer) {
 void Bot::endFrame(PlayLayer* layer) {
     this->closeTick(layer);
     if (m_state == BotState::Playing && layer) {
-        ObjectTracker::get().observeVisible(layer);
+        auto& tracker = ObjectTracker::get();
+        if (!tracker.levelScanned()) tracker.scanLevel(layer);
+        tracker.observeVisible(layer);
     }
 }
 
@@ -725,9 +730,10 @@ void Bot::runShadow(PlayLayer* layer) {
     }
     if (m_stats.shadowTicks % 1200 == 0) {
         log::info(
-            "Tick checks: {} ticks, {} differ; press/release ticks: {}, {} differ; moving objects: {} of {}",
+            "Tick checks: {} ticks, {} differ; press/release ticks: {}, {} differ; moving objects: {} of {}, "
+            "trigger moves: {}",
             m_stats.shadowTicks, m_stats.shadowMismatches, m_shadowInputTicks, m_shadowInputMismatches,
-            ObjectTracker::get().movingCount(), ObjectTracker::get().size()
+            ObjectTracker::get().movingCount(), ObjectTracker::get().size(), ObjectTracker::get().commands().size()
         );
     }
 }
@@ -870,7 +876,7 @@ void Bot::onRealComplete(PlayLayer*) {
     if (m_state != BotState::Playing && !m_usedThisAttempt) return;
     m_check.reset();
     m_state = BotState::Finished;
-    this->setStatus("Level completed (safe mode: nothing was saved)");
+    this->setStatus(settings::safeMode() ? "Level completed (safe mode: nothing was saved)" : "Level completed");
 }
 
 } // namespace ac

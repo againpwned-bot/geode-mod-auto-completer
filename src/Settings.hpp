@@ -35,6 +35,7 @@ inline void setFloat(char const* key, double value) {
 }
 
 inline bool enabled() { return getBool("enabled"); }
+inline bool safeMode() { return getBool("safe-mode"); }
 inline bool ignoreInputs() { return getBool("ignore-inputs"); }
 inline bool autoCorrect() { return getBool("auto-correct"); }
 inline bool pathViewer() { return getBool("path-viewer"); }

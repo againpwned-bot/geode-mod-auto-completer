@@ -2,9 +2,11 @@
 #include <Geode/modify/EffectGameObject.hpp>
 #include <Geode/modify/EnhancedGameObject.hpp>
 #include <Geode/modify/GJBaseGameLayer.hpp>
+#include <Geode/modify/GJEffectManager.hpp>
 #include <Geode/modify/GameObject.hpp>
 #include <Geode/modify/PlayLayer.hpp>
 #include <Geode/modify/PlayerObject.hpp>
+#include <Geode/modify/SpawnTriggerGameObject.hpp>
 
 #include "../bot/Bot.hpp"
 #include "../bot/FakeSim.hpp"
@@ -72,8 +74,8 @@ namespace {
         auto const now = object->getRealPosition();
         bool const moving = last.x != now.x || last.y != now.y;
         return fmt::format(
-            "obj {} type {} at ({:.1f},{:.1f}) size {:.0f}x{:.0f}{}{}{}{}{}{}{}",
-            object->m_objectID, static_cast<int>(object->m_objectType), object->getPositionX(), object->getPositionY(),
+            "obj {} type {} at ({:.1f},{:.1f}) size {:.0f}x{:.0f}{}{}{}{}{}{}{}; {}",
+            object->m_objectID, static_cast<int>(object->m_objectType), object->m_positionX, object->m_positionY,
             rect.size.width, rect.size.height,
             simulated ? "" : " [type not simulated]",
             moving ? " moving" : "",
@@ -81,7 +83,8 @@ namespace {
             object->m_isPassable ? " passable" : "",
             object->m_isHide ? " hidden" : "",
             object->m_isGroupDisabled ? " groupDisabled" : "",
-            object->m_isDisabled ? " disabled" : ""
+            object->m_isDisabled ? " disabled" : "",
+            ac::ObjectTracker::get().describe(object)
         );
     }
 }
@@ -236,7 +239,7 @@ class $modify(ACBaseGameLayer, GJBaseGameLayer) {
                 auto& tracker = ac::ObjectTracker::get();
                 int const count = std::min<int>(objectCount, static_cast<int>(objects->size()));
                 for (int i = 0; i < count; ++i) {
-                    tracker.observe((*objects)[i]);
+                    if (auto* object = (*objects)[i]) tracker.observe(object);
                 }
             }
             GJBaseGameLayer::collisionCheckObjects(player, objects, objectCount, dt);
@@ -370,6 +373,40 @@ class $modify(ACEnhancedGameObject, EnhancedGameObject) {
 class $modify(ACEffectGameObject, EffectGameObject) {
     void triggerObject(GJBaseGameLayer* layer, int uniqueID, gd::vector<int> const* remapKeys) {
         if (simulating()) return;
+        // Lets the tracker see which trigger starts which move.
+        auto& tracker = ac::ObjectTracker::get();
+        double const playerX = layer && layer->m_player1 ? layer->m_player1->getPositionX() : 0.0;
+        auto* previous = tracker.beginTrigger(this, layer, playerX);
         EffectGameObject::triggerObject(layer, uniqueID, remapKeys);
+        tracker.endTrigger(previous);
+    }
+};
+
+class $modify(ACSpawnTriggerGameObject, SpawnTriggerGameObject) {
+    void triggerObject(GJBaseGameLayer* layer, int uniqueID, gd::vector<int> const* remapKeys) {
+        if (simulating()) return;
+        auto& tracker = ac::ObjectTracker::get();
+        double const playerX = layer && layer->m_player1 ? layer->m_player1->getPositionX() : 0.0;
+        auto* previous = tracker.beginTrigger(this, layer, playerX);
+        SpawnTriggerGameObject::triggerObject(layer, uniqueID, remapKeys);
+        tracker.endTrigger(previous);
+    }
+};
+
+class $modify(ACEffectManager, GJEffectManager) {
+    void createMoveCommand(
+        CCPoint pt, int groupID, float duration, int easingType, float easingRate, bool lockPlayerX, bool lockPlayerY,
+        bool lockCameraX, bool lockCameraY, float moveModX, float moveModY, int uniqueID, int controlID
+    ) {
+        if (!simulating()) {
+            ac::ObjectTracker::get().onMoveCommand(
+                pt, groupID, duration, easingType, easingRate, lockPlayerX, lockPlayerY, lockCameraX, lockCameraY,
+                moveModX, moveModY
+            );
+        }
+        GJEffectManager::createMoveCommand(
+            pt, groupID, duration, easingType, easingRate, lockPlayerX, lockPlayerY, lockCameraX, lockCameraY, moveModX,
+            moveModY, uniqueID, controlID
+        );
     }
 };

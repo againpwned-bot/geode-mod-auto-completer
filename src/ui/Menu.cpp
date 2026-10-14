@@ -157,9 +157,15 @@ void drawBotWindow(Bot& bot) {
         ImGui::EndDisabled();
 
         ImGui::Spacing();
-        ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
-        ImGui::TextWrapped("Safe mode is always on while the bot plays: no progress, stars or leaderboard submissions are saved.");
-        ImGui::PopStyleColor();
+        settingSwitch(
+            "Safe mode", "safe-mode",
+            "While the bot plays, nothing is saved: no progress, stars, coins or leaderboard submissions."
+        );
+        if (!settings::safeMode()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, kMuted);
+            ImGui::TextWrapped("Safe mode is off: levels the bot completes count like normal runs.");
+            ImGui::PopStyleColor();
+        }
     }
     ImGui::End();
 }
