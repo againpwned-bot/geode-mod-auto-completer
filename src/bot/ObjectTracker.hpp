@@ -110,12 +110,19 @@ public:
     // Moves `object` to where it will be during the step being simulated, recording how to
     // undo it. Objects that aren't moving are left alone.
     void predict(GameObject* object, Track const& track, Context const& ctx, std::vector<Moved>& moved) const;
+    // Where `object` is expected during `step`, the player having travelled (dx, dy) by then.
+    cocos2d::CCPoint estimate(GameObject* object, int step, double playerDx, double playerDy) const;
     static void restore(std::vector<Moved>& moved);
     // Whether `group` is being moved during (world step, step].
     static bool movesDuring(MoveCommand const& command, int worldStep, int step);
 
-    // Hazards in a group (cached per level), for moving groups far from the player.
-    std::vector<GameObject*> const& groupHazards(GJBaseGameLayer* layer, int group);
+    // Hazards, orbs and pads: what the hidden player must meet even while it is still filed
+    // under a part of the level its own collision check doesn't look at.
+    static bool reachType(GameObject* object);
+    // Those objects in a group (cached per level), for moving groups far from the player.
+    std::vector<GameObject*> const& groupObjects(GJBaseGameLayer* layer, int group);
+    // Every orb and pad in the level (for the log).
+    std::vector<GameObject*> const& orbs() const { return m_orbs; }
 
     // Groups and running moves of an object, for the log.
     std::string describe(GameObject* object) const;
@@ -130,6 +137,8 @@ public:
 
 private:
     bool commandFor(EffectGameObject* trigger, int start, MoveCommand& out) const;
+    // How far `object` moves from the world step to `ctx.step`; false if it doesn't.
+    bool offsetAt(GameObject* object, Track const* track, Context const& ctx, double& dx, double& dy) const;
     // Compares a measured move of `object` between two steps with the move the commands say.
     void calibrate(GameObject* object, int from, int to, double dx, double dy);
     // Move and toggle triggers a spawn trigger starts.
@@ -158,7 +167,8 @@ private:
 
     std::vector<PositionTrigger> m_triggers;
     std::unordered_map<EffectGameObject*, std::vector<EffectGameObject*>> m_spawned;
-    std::unordered_map<int, std::vector<GameObject*>> m_groupHazards;
+    std::unordered_map<int, std::vector<GameObject*>> m_groupObjects;
+    std::vector<GameObject*> m_orbs;
     bool m_scanned = false;
     bool m_loggedSections = false;
 

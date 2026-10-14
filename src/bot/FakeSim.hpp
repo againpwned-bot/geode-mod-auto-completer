@@ -224,9 +224,9 @@ private:
     void runOp(TickOp const& op);
     void stepPhysics();
     void stepPlayer();
-    // Checks moving hazards that will be near the hidden player but sit in sections its own
-    // collision check doesn't look at yet.
-    void collideMovingHazards(float dt);
+    // Checks moving (or switched on) hazards, orbs and pads that will be near the hidden
+    // player but are filed under sections its own collision check doesn't look at.
+    void collideMovingObjects(float dt);
     ObjectTracker::Context placeContext() const;
     // Puts every object moved or switched for this tick back.
     void restoreObjects();

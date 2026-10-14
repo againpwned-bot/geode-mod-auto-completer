@@ -575,7 +575,7 @@ void FakeSim::restoreObjects() {
     m_switched.clear();
 }
 
-void FakeSim::collideMovingHazards(float dt) {
+void FakeSim::collideMovingObjects(float dt) {
     auto& tracker = ObjectTracker::get();
     int const step = this->absoluteStep();
     int const world = tracker.worldStep();
@@ -596,9 +596,7 @@ void FakeSim::collideMovingHazards(float dt) {
 
     gd::vector<GameObject*> nearby;
     auto consider = [&](GameObject* object, bool farCheck) {
-        if (object->m_objectType != GameObjectType::Hazard && object->m_objectType != GameObjectType::AnimatedHazard) {
-            return;
-        }
+        if (!ObjectTracker::reachType(object)) return;
         float const reach = 90.f + object->getObjectRadius();
         if (farCheck && (std::abs(object->m_positionX - center.x) > reach + range + 300.0 ||
                          std::abs(object->m_positionY - center.y) > reach + range + 300.0)) {
@@ -616,7 +614,7 @@ void FakeSim::collideMovingHazards(float dt) {
     for (size_t i = 0; i < moving.size(); ++i) {
         consider(moving[i], false);
     }
-    // Hazards of groups that triggers are moving.
+    // Hazards, orbs and pads of groups that triggers are moving.
     std::vector<int> groups;
     auto addGroup = [&](MoveCommand const& command) {
         if (!ObjectTracker::movesDuring(command, world, step)) return;
@@ -634,7 +632,7 @@ void FakeSim::collideMovingHazards(float dt) {
     for (auto const& toggle : tracker.expectedToggles()) addToggled(toggle);
     for (auto const& toggle : m_toggles) addToggled(toggle);
     for (int group : groups) {
-        for (auto* object : tracker.groupHazards(m_layer, group)) consider(object, true);
+        for (auto* object : tracker.groupObjects(m_layer, group)) consider(object, true);
     }
 
     if (!nearby.empty()) {
@@ -700,7 +698,7 @@ void FakeSim::stepPlayer() {
             player->resetCollisionLog(false);
         }
         if (op.kind == TickOp::Kind::Collide && !ctx.died) {
-            this->collideMovingHazards(op.dt);
+            this->collideMovingObjects(op.dt);
         }
         if (ctx.died) return;
     }

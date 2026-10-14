@@ -12,9 +12,28 @@ namespace {
 // GD 2.2081 runs 240 physics steps per second.
 constexpr double kStepsPerSecond = 240.0;
 
-bool isHazard(GameObject* object) {
-    auto const type = object->m_objectType;
-    return type == GameObjectType::Hazard || type == GameObjectType::AnimatedHazard;
+bool isOrb(GameObject* object) {
+    switch (object->m_objectType) {
+        case GameObjectType::YellowJumpPad:
+        case GameObjectType::PinkJumpPad:
+        case GameObjectType::GravityPad:
+        case GameObjectType::RedJumpPad:
+        case GameObjectType::SpiderPad:
+        case GameObjectType::YellowJumpRing:
+        case GameObjectType::PinkJumpRing:
+        case GameObjectType::GravityRing:
+        case GameObjectType::GreenRing:
+        case GameObjectType::DropRing:
+        case GameObjectType::RedJumpRing:
+        case GameObjectType::CustomRing:
+        case GameObjectType::DashRing:
+        case GameObjectType::GravityDashRing:
+        case GameObjectType::SpiderOrb:
+        case GameObjectType::TeleportOrb:
+            return true;
+        default:
+            return false;
+    }
 }
 
 // Move triggers whose offset this model understands.
@@ -445,8 +464,10 @@ void ObjectTracker::scanLevel(GJBaseGameLayer* layer) {
     int others = 0;
     // Other triggers that move or hide things, for the log.
     std::unordered_map<int, int> unhandled;
+    m_orbs.clear();
     for (auto* object : CCArrayExt<GameObject*>(layer->m_objects)) {
         if (!object) continue;
+        if (isOrb(object)) m_orbs.push_back(object);
         int const id = object->m_objectID;
         switch (id) {
             case 1007: case 1346: case 1347: case 1814: case 1815: case 1595: case 1616: case 3016:
@@ -527,12 +548,12 @@ bool ObjectTracker::movesDuring(MoveCommand const& command, int worldStep, int s
     return command.start < step && command.end() + 16 >= worldStep;
 }
 
-void ObjectTracker::predict(GameObject* object, Track const& track, Context const& ctx, std::vector<Moved>& moved) const {
+bool ObjectTracker::offsetAt(GameObject* object, Track const* track, Context const& ctx, double& dx, double& dy) const {
+    dx = 0.0;
+    dy = 0.0;
     int const step = ctx.step;
-    if (step <= m_worldStep) return;
+    if (step <= m_worldStep) return false;
 
-    double dx = 0.0;
-    double dy = 0.0;
     bool commanded = false;
     bool const extra = ctx.extra && !ctx.extra->empty();
     if (!m_byGroup.empty() || extra) {
@@ -564,14 +585,33 @@ void ObjectTracker::predict(GameObject* object, Track const& track, Context cons
     }
     if (!commanded) {
         // Nothing known moves it: keep its measured speed, from where it is right now.
-        if (track.vx == 0.0 && track.vy == 0.0) return;
-        if (track.step != m_worldStep) return;
+        if (!track || (track->vx == 0.0 && track->vy == 0.0) || track->step + 16 < m_worldStep) return false;
         // Far out the guess is worthless; hold it there.
-        double const ahead = std::min(step - track.step, 240);
-        dx = track.vx * ahead;
-        dy = track.vy * ahead;
+        double const ahead = std::min(step - m_worldStep, 240);
+        dx = track->vx * ahead;
+        dy = track->vy * ahead;
     }
-    if (std::abs(dx) < 1e-4 && std::abs(dy) < 1e-4) return;
+    return std::abs(dx) >= 1e-4 || std::abs(dy) >= 1e-4;
+}
+
+CCPoint ObjectTracker::estimate(GameObject* object, int step, double playerDx, double playerDy) const {
+    Context context;
+    context.step = step;
+    context.playerDx = playerDx;
+    context.playerDy = playerDy;
+    auto const it = m_tracks.find(object);
+    double dx = 0.0;
+    double dy = 0.0;
+    this->offsetAt(object, it == m_tracks.end() ? nullptr : &it->second, context, dx, dy);
+    return ccp(object->m_positionX + dx, object->m_positionY + dy);
+}
+
+void ObjectTracker::predict(GameObject* object, Track const& track, Context const& ctx, std::vector<Moved>& moved) const {
+    // Placing objects only uses what was seen this very step.
+    if (track.step != m_worldStep) return;
+    double dx = 0.0;
+    double dy = 0.0;
+    if (!this->offsetAt(object, &track, ctx, dx, dy)) return;
 
     Moved undo;
     undo.object = object;
@@ -606,12 +646,19 @@ void ObjectTracker::restore(std::vector<Moved>& moved) {
     moved.clear();
 }
 
-std::vector<GameObject*> const& ObjectTracker::groupHazards(GJBaseGameLayer* layer, int group) {
-    auto [it, inserted] = m_groupHazards.try_emplace(group);
+bool ObjectTracker::reachType(GameObject* object) {
+    auto const type = object->m_objectType;
+    // Teleport orbs aren't simulated; they only show up in the log.
+    return type == GameObjectType::Hazard || type == GameObjectType::AnimatedHazard ||
+        (isOrb(object) && type != GameObjectType::TeleportOrb);
+}
+
+std::vector<GameObject*> const& ObjectTracker::groupObjects(GJBaseGameLayer* layer, int group) {
+    auto [it, inserted] = m_groupObjects.try_emplace(group);
     if (!inserted || !layer) return it->second;
     if (auto* objects = layer->getGroup(group)) {
         for (auto* object : CCArrayExt<GameObject*>(objects)) {
-            if (object && isHazard(object)) it->second.push_back(object);
+            if (object && reachType(object)) it->second.push_back(object);
         }
     }
     return it->second;
@@ -665,7 +712,8 @@ void ObjectTracker::resetLevel() {
     this->resetAttempt();
     m_triggers.clear();
     m_spawned.clear();
-    m_groupHazards.clear();
+    m_groupObjects.clear();
+    m_orbs.clear();
     m_scanned = false;
     m_loggedSections = false;
 }

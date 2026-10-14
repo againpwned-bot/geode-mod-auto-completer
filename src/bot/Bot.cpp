@@ -156,6 +156,7 @@ void Bot::onLevelInit(PlayLayer* layer) {
     m_probe = InlineProbe{};
     m_shadowLogged = 0;
     m_surprisesLogged = 0;
+    m_orbLogs = 0;
     m_shadowInputLogged = 0;
     m_shadowInputTicks = 0;
     m_shadowInputMismatches = 0;
@@ -412,7 +413,10 @@ void Bot::retryCheck(bool robust) {
         );
         this->logTrace(*check.planner, check.t0);
     }
-    if (!check.retried) this->diagnoseStuck(check);
+    if (!check.retried) {
+        this->diagnoseStuck(check);
+        this->logOrbsNearPath(check);
+    }
     m_stats.evaluations += check.planner->evaluations();
 
     // Back to the state the check started from, then forget the old planner (its
@@ -554,6 +558,7 @@ void Bot::finishCheck() {
         float const at = end > 0 ? progressOf(m_layer, samples[end - 1].x) : 0.f;
         this->setStatus(fmt::format("No safe path found ahead (around {})", percent(at)));
         this->logDeath(*check.sim);
+        this->logOrbsNearPath(check);
         if (m_tracesLogged < 6) {
             m_tracesLogged += 1;
             this->logTrace(planner, check.t0);
@@ -918,6 +923,62 @@ void Bot::logDeath(FakeSim const& sim) {
         "Simulation died {} ticks ahead at ({:.1f},{:.1f}) by obj {} type {} at ({:.1f},{:.1f}){}; real player at x {:.1f}",
         d.tick, d.x, d.y, d.objectId, d.objectType, d.objectX, d.objectY, why, realX
     );
+}
+
+void Bot::logOrbsNearPath(Check const& check) {
+    if (m_orbLogs >= 6 || !check.planner) return;
+    auto const& samples = check.planner->samples();
+    int const end = std::min<int>(static_cast<int>(samples.size()), check.planner->bestFrontier() + 1);
+    int const from = std::min(check.floor, end);
+    if (end - from < 2) return;
+    m_orbLogs += 1;
+
+    float minX = samples[from].x;
+    float maxX = samples[from].x;
+    for (int t = from; t < end; ++t) {
+        minX = std::min(minX, samples[t].x);
+        maxX = std::max(maxX, samples[t].x);
+    }
+    // Orbs and pads the planned path comes close to, closest first.
+    struct Near {
+        GameObject* object;
+        float distance;
+        int tick;
+    };
+    std::vector<Near> found;
+    auto& tracker = ObjectTracker::get();
+    auto* real = m_layer ? m_layer->m_player1 : nullptr;
+    float const realX = real ? real->getPositionX() : samples[from].x;
+    float const realY = real ? real->getPositionY() : samples[from].y;
+    for (auto* orb : tracker.orbs()) {
+        // Moving orbs can come from far away; anything within a few hundred units counts.
+        if (orb->m_positionX < minX - 600.0 || orb->m_positionX > maxX + 600.0) continue;
+        float best = 1e9f;
+        int bestTick = -1;
+        for (int t = from; t < end; ++t) {
+            // Where the orb is expected to be at that tick, not where it is now.
+            auto const at = tracker.estimate(orb, static_cast<int>(check.t0) + t, samples[t].x - realX, samples[t].y - realY);
+            float const d = std::max(std::abs(samples[t].x - at.x), std::abs(samples[t].y - at.y));
+            if (d < best) {
+                best = d;
+                bestTick = t;
+            }
+        }
+        if (best < 120.f) found.push_back({ orb, best, bestTick });
+    }
+    std::sort(found.begin(), found.end(), [](Near const& a, Near const& b) { return a.distance < b.distance; });
+
+    std::string out;
+    for (size_t i = 0; i < found.size() && i < 5; ++i) {
+        auto* orb = found[i].object;
+        out += fmt::format(
+            " | obj {} type {} at ({:.1f},{:.1f}){}{}, path {:.0f} away at tick {}; {}", orb->m_objectID,
+            static_cast<int>(orb->m_objectType), orb->m_positionX, orb->m_positionY,
+            orb->m_isGroupDisabled ? " switched off" : "", orb->m_isDisabled ? " disabled" : "", found[i].distance,
+            check.t0 + found[i].tick, ObjectTracker::get().describe(orb)
+        );
+    }
+    log::info("Orbs and pads near the path from tick {}:{}", check.t0, out.empty() ? " none within 120" : out);
 }
 
 void Bot::onRealDeath(PlayLayer* layer, std::string const& killer) {

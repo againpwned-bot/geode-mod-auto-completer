@@ -109,6 +109,8 @@ private:
     // Whether the real player's mode, gravity or dual state changed in a way the plan
     // didn't predict.
     bool movementSurprise(PlayLayer* layer, unsigned now);
+    // Logs the orbs and pads the planned path of a stuck check passes near.
+    void logOrbsNearPath(Check const& check);
     void retryCheck(bool robust);
     void finishCheck();
     void logTrace(Planner const& planner, unsigned t0);
@@ -142,6 +144,7 @@ private:
     int m_movement = 0;
     bool m_movementKnown = false;
     int m_surprisesLogged = 0;
+    int m_orbLogs = 0;
     bool m_desyncFlagged = false;
 
     Calibration m_calibration;

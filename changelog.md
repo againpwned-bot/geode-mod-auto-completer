@@ -1,3 +1,7 @@
+# v1.3.7
+- Fix: the bot didn't see orbs and pads that move along with the player (like the pink orb on "I Spy"). The hidden player only checks objects filed near its own spot in the level, and while it looks a second or two ahead, an orb travelling with the player is still filed back where the player is now. Moving hazards were already handled this way; orbs and pads now are too, including ones a toggle trigger is about to switch on.
+- Logs: when the bot gets stuck, it lists the orbs and pads the planned path passes near (type, where they are expected to be at that moment, whether they are moving or switched off).
+
 # v1.3.6
 - Portals: the hidden player now goes through mode portals (ship, ball, UFO, wave, robot, spider, swing, cube) instead of stopping the look-ahead there, so the bot plans the tight part right after a portal ahead of time.
 - Right after the real player changes mode, or goes through a gravity, dual or teleport portal the plan didn't expect, the bot plans again from its real state at once, free to change even the very next tick (it used to keep the next 12 ticks fixed).
