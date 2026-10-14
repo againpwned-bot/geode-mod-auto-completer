@@ -192,16 +192,16 @@ void ObjectTracker::onMoveCommand(
         }
         if (axes > 0) {
             double const scale = sum / axes;
-            int const small = trigger->m_smallStep ? 1 : 0;
+            int const unit = trigger->m_smallStep ? 1 : 0;
             if (scale > 0.05 && scale < 20.0) {
-                if (!m_scaleKnown[small] || std::abs(scale - m_scale[small]) > m_scale[small] * 0.05) {
+                if (!m_scaleKnown[unit] || std::abs(scale - m_scale[unit]) > m_scale[unit] * 0.05) {
                     log::info(
                         "Move trigger offset ({:.1f},{:.1f}){} moves by ({:.1f},{:.1f}): scale {:.3f}",
-                        raw.x, raw.y, small ? " (small step)" : "", offset.x, offset.y, scale
+                        raw.x, raw.y, unit ? " (small step)" : "", offset.x, offset.y, scale
                     );
                 }
-                m_scale[small] = scale;
-                m_scaleKnown[small] = true;
+                m_scale[unit] = scale;
+                m_scaleKnown[unit] = true;
             }
         }
     }
@@ -296,12 +296,12 @@ void ObjectTracker::calibrate(GameObject* object, int from, int to, double dx, d
 
 bool ObjectTracker::commandFor(EffectGameObject* trigger, int start, MoveCommand& out) const {
     if (!plainMove(trigger)) return false;
-    int const small = trigger->m_smallStep ? 1 : 0;
+    int const unit = trigger->m_smallStep ? 1 : 0;
     bool const locked = trigger->m_lockToPlayerX || trigger->m_lockToPlayerY || trigger->m_lockToCameraX ||
         trigger->m_lockToCameraY;
     // Until a real move shows the offset's units, only locked moves can be predicted.
-    if (!m_scaleKnown[small] && !locked) return false;
-    double const scale = m_scaleKnown[small] ? m_scale[small] : 1.0;
+    if (!m_scaleKnown[unit] && !locked) return false;
+    double const scale = m_scaleKnown[unit] ? m_scale[unit] : 1.0;
 
     out = MoveCommand{};
     out.group = trigger->m_targetGroupID;
