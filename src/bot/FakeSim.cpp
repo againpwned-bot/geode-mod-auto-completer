@@ -261,8 +261,8 @@ void ObjectTracker::predict(GameObject* object, int step, std::vector<Moved>& mo
     float const fy = static_cast<float>(dy);
     object->m_positionX = undo.positionX + dx;
     object->m_positionY = undo.positionY + dy;
-    object->m_obPosition = { undo.node.x + fx, undo.node.y + fy };
-    object->m_lastPosition = { undo.last.x + fx, undo.last.y + fy };
+    object->m_obPosition = cocos2d::CCPoint(undo.node.x + fx, undo.node.y + fy);
+    object->m_lastPosition = cocos2d::CCPoint(undo.last.x + fx, undo.last.y + fy);
     object->m_isObjectRectDirty = true;
     object->m_isOrientedBoxDirty = true;
 }
