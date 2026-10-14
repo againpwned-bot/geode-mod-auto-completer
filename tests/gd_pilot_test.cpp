@@ -362,6 +362,7 @@ PilotResult pilot(Level const& level, PlayStyle style, int jitterPercent, uint32
                             case Kind::Fix: std::printf(" | D%d lo%d:", t0 + e.a, t0 + e.b); break;
                             case Kind::Eval: std::printf(" %d:%d", t0 + e.a, e.b); break;
                             case Kind::Choose: std::printf(" ->%d", t0 + e.a); break;
+                            case Kind::Explore: std::printf(" try%d", t0 + e.a); break;
                             case Kind::Backtrack: std::printf(" undo%d", t0 + e.a); break;
                             case Kind::GiveUp: std::printf(" giveup"); break;
                         }

@@ -90,6 +90,11 @@ struct PlannerConfig {
     int safetyMargin = 3;      // ticks kept away from the edges of a safe timing window
     int clearTicks = 30;       // surviving this long past the old death counts as fully clear
     bool robust = false;       // a click only counts if one tick earlier and later also work
+    // When no click outlives a death, an orb click that only changes how the player dies
+    // may be tried, so the next click can fix that (e.g. orb A, then orb B). At most this
+    // many in a row; each needs this much room before its own death for the next click.
+    int exploreDepth = 2;
+    int exploreRoom = 8;
     uint32_t seed = 0;
 
     static PlannerConfig forStyle(PlayStyle style, uint32_t seed);
@@ -144,9 +149,9 @@ public:
 
     // What the search did, for diagnostics (bounded).
     struct TraceEntry {
-        enum class Kind : uint8_t { Fix, Eval, Choose, Backtrack, GiveUp };
+        enum class Kind : uint8_t { Fix, Eval, Choose, Explore, Backtrack, GiveUp };
         Kind kind = Kind::Eval;
-        int a = 0; // Fix: death tick, Eval: tick, Choose/Backtrack/GiveUp: tick
+        int a = 0; // Fix: death tick, Eval: tick, Choose/Explore/Backtrack/GiveUp: tick
         int b = 0; // Fix: lowest tick scanned, Eval: survival past the death
     };
     std::vector<TraceEntry> const& trace() const { return m_trace; }
@@ -183,6 +188,7 @@ private:
         int deathTick = 0;
         int lo = 0;
         int scanNext = -1;
+        bool explore = false; // changes how the player dies instead of avoiding it
     };
 
     // State of an in-progress fix search (spread over several step() calls).
@@ -194,6 +200,7 @@ private:
         int firstValid = -1;
         int invalidStreak = 0;
         std::vector<Candidate> valid;
+        std::vector<Candidate> explore; // die elsewhere or sooner, but differently
     };
 
     bool policyInput(Policy& policy, int tick, Mode mode, Decision const* extra, int extraTick) const;
@@ -244,8 +251,12 @@ private:
     // only acts on the ground or on an orb, and a press in the air would just be a
     // buffered input whose effect depends on exact timing.
     bool canPressAt(int tick) const;
+    // Whether the player touches an orb or ring at `tick` on the current path.
+    bool ringAt(int tick) const;
     // Whether the candidate's click also works one tick earlier and later.
-    bool robustAt(Candidate const& c);
+    // `explore`: the neighbours must end the same way instead of surviving.
+    bool robustAt(Candidate const& c, bool explore);
+    void chooseExplore(std::vector<Candidate> explore);
     void note(TraceEntry::Kind kind, int a, int b = 0) {
         if (m_trace.size() < 600) m_trace.push_back(TraceEntry{ kind, a, b });
     }

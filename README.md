@@ -11,15 +11,17 @@ A pathfinding bot for **Geometry Dash 2.2081** on **Geode v5**. It plays levels 
   - **Legit Human:** natural jitter in timing and tap length.
   - **Minimal:** the latest tick that still keeps the margin.
 
-  A click only counts if the same click one tick earlier and later also works, so a small timing error can't kill. Cube, robot, ball and spider only press where a press does something (on the ground or on an orb). If nothing in the window works, the planner backtracks to earlier decisions; if the previous plan led into a dead end, the stretch is planned again from scratch. The next 12 ticks are always fixed, so the bot never changes an input it is about to play.
+  A click only counts if the same click one tick earlier and later also works, so a small timing error can't kill. Cube, robot, ball and spider only press where a press does something (on the ground or on an orb). If nothing in the window works, the planner may take an orb click that only changes how the player would die and look for the follow-up click from there (orb chains, like a gravity orb up and another one back down), at most two in a row. Otherwise it backtracks to earlier decisions; if the previous plan led into a dead end, the stretch is planned again from scratch. The next 12 ticks are always fixed, so the bot never changes an input it is about to play.
+- **Moving objects.** Every move trigger GD starts is recorded (offset, duration, easing, lock to player), and the simulation starts the move triggers the player will pass, directly or through a spawn trigger. The hidden player meets moving hazards and platforms where they will be.
 - **Portals.** Speed and size portals are applied to the hidden player. Mode, gravity, dual and teleport portals end the look-ahead: the bot plans up to the portal and continues from the real player's new state once it is through.
 
-The planner (`src/planner`) has no Geode dependencies. CI runs two native test suites with sanitizers on every push:
-- `tests/planner_test.cpp`: the planner against a toy physics model, including the exact look-ahead loop the game uses.
+The planner (`src/planner`) and the move model (`src/bot/Motion.hpp`) have no Geode dependencies. CI runs three native test suites with sanitizers on every push:
+- `tests/planner_test.cpp`: the planner against a toy physics model, including the exact look-ahead loop the game uses and orb chains.
 - `tests/gd_pilot_test.cpp`: the whole bot loop on a physics model matched to GD 2.2081 measurements (jump arc, speed, spike hitboxes), with inputs sometimes applied a tick late.
+- `tests/motion_test.cpp`: GD's easing curves and how move triggers move their groups.
 
 ## Safe mode
-Safe mode is always on while the bot is active. It uses the same flag as start positions, so nothing is saved: no progress, stars, coins or leaderboard submissions. The bot is disabled on editor levels, so it can't verify uploads.
+Safe mode is on by default (switch it in the menu or the mod settings). While the bot plays it uses the same flag as start positions, so nothing is saved: no progress, stars, coins or leaderboard submissions. The bot is always disabled on editor levels, so it can't verify uploads.
 
 ## Install (Windows, or Linux through Steam/Proton)
 1. Install [Geode](https://geode-sdk.org) for GD 2.2081.

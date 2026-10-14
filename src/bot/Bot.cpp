@@ -439,6 +439,7 @@ void Bot::logTrace(Planner const& planner, unsigned t0) {
             case Kind::Fix: out += fmt::format(" | death {} scan to {}:", e.a, e.b); break;
             case Kind::Eval: out += fmt::format(" {}:{}", e.a, e.b); break;
             case Kind::Choose: out += fmt::format(" -> press {}", e.a); break;
+            case Kind::Explore: out += fmt::format(" -> try {}", e.a); break;
             case Kind::Backtrack: out += fmt::format(" | undo {}", e.a); break;
             case Kind::GiveUp: out += fmt::format(" | give up at {}", e.a); break;
         }

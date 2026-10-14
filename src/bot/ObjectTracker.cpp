@@ -286,12 +286,29 @@ void ObjectTracker::calibrate(GameObject* object, int from, int to, double dx, d
     double const ratio = (dx * px + dy * py) / length;
     if (ratio < 0.2 || ratio > 5.0) return;
 
+    constexpr size_t kKeep = 64;
+    if (m_ratios.size() < kKeep) m_ratios.push_back(ratio);
+    else m_ratios[m_ratioCount % kKeep] = ratio;
     m_ratioCount += 1;
-    m_ratio = m_ratioCount == 1 ? ratio : m_ratio + (ratio - m_ratio) / std::min(m_ratioCount, 50);
-    if (m_ratioCount >= 10 && std::abs(m_ratio - m_loggedRatio) > 0.1) {
-        m_loggedRatio = m_ratio;
-        log::info("Moves measured at {:.2f}x their trigger offset ({} samples)", m_ratio, m_ratioCount);
+    if (m_ratioCount % 16 != 0) return;
+
+    // The median shrugs off objects that something else moves too. GD's factor is a simple
+    // one, so anything near 1 is 1.
+    std::vector<double> sorted = m_ratios;
+    std::sort(sorted.begin(), sorted.end());
+    double const median = sorted[sorted.size() / 2];
+    double scale = 1.0;
+    if (median < 0.8 || median > 1.25) {
+        for (double factor : { 1.0 / 3.0, 0.5, 2.0, 3.0 }) {
+            if (std::abs(median - factor) <= factor * 0.15) scale = factor;
+        }
     }
+    if (m_ratioCount == 16 || scale != m_offsetScale) {
+        log::info(
+            "Moves measured at {:.2f}x their trigger offset ({} samples); using {:.2f}x", median, m_ratioCount, scale
+        );
+    }
+    m_offsetScale = scale;
 }
 
 bool ObjectTracker::commandFor(EffectGameObject* trigger, int start, MoveCommand& out) const {

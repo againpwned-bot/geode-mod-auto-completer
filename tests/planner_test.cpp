@@ -344,6 +344,109 @@ Event replay(Level const& level, std::vector<uint8_t> const& bits, int ticks) {
     return sim.run(ticks + 400, input, sample).event;
 }
 
+// Two orbs in a row, like the gravity orbs on "I Spy": orb A flips the player up, which on
+// its own dies sooner than staying down; orb B, only reachable after A, saves it. The
+// planner has to accept A even though it alone makes things worse.
+class ChainSim final : public Simulator {
+public:
+    struct Rules {
+        int aFrom = 40, aTo = 52;    // ticks the player touches orb A while down
+        int bFrom = 20, bTo = 32;    // ticks after A that it touches orb B while up
+        int downDies = 120;          // staying down dies here
+        int upDies = 45;             // ticks after A that being up dies
+        int end = 600;
+    };
+    explicit ChainSim(Rules rules) : m_rules(rules) {}
+
+    int tick() const override { return m_state.tick; }
+    int save() override {
+        m_snaps.push_back(m_state);
+        m_live.push_back(true);
+        return static_cast<int>(m_snaps.size() - 1);
+    }
+    void load(int handle) override {
+        assert(handle >= 0 && handle < static_cast<int>(m_snaps.size()) && m_live[handle]);
+        m_state = m_snaps[handle];
+    }
+    void release(int handle) override {
+        assert(handle >= 0 && handle < static_cast<int>(m_snaps.size()) && m_live[handle]);
+        m_live[handle] = false;
+    }
+    RunResult run(int untilTick, InputFn const& input, SampleFn const& sample) override {
+        RunResult result;
+        while (m_state.tick < untilTick) {
+            int const t = m_state.tick;
+            bool const held = input(t, Mode::Cube);
+            auto& s = m_state;
+            if (held && !s.held) s.buffered = true;
+            if (!held) s.buffered = false;
+            s.held = held;
+
+            bool ring = false;
+            if (s.phase == 0 && t >= m_rules.aFrom && t <= m_rules.aTo) {
+                ring = true;
+                if (s.buffered) {
+                    s.phase = 1;
+                    s.flipTick = t;
+                    s.buffered = false;
+                }
+            }
+            else if (s.phase == 1 && t >= s.flipTick + m_rules.bFrom && t <= s.flipTick + m_rules.bTo) {
+                ring = true;
+                if (s.buffered) {
+                    s.phase = 2;
+                    s.buffered = false;
+                }
+            }
+            s.tick += 1;
+
+            Sample out;
+            out.x = static_cast<float>(t);
+            out.y = s.phase == 1 ? 100.f : 0.f;
+            out.hold = held;
+            out.mode = Mode::Cube;
+            out.grounded = s.phase != 1;
+            out.ring = ring;
+            sample(t, out);
+
+            bool const died = (s.phase == 0 && t >= m_rules.downDies) ||
+                (s.phase == 1 && t >= s.flipTick + m_rules.upDies);
+            if (died || t + 1 >= m_rules.end) {
+                result.event = died ? Event::Died : Event::Completed;
+                result.eventTick = t;
+                break;
+            }
+        }
+        result.endTick = m_state.tick;
+        return result;
+    }
+    int liveSnapshots() const {
+        int n = 0;
+        for (bool b : m_live) n += b ? 1 : 0;
+        return n;
+    }
+
+private:
+    struct State {
+        int tick = 0;
+        int phase = 0;
+        int flipTick = 0;
+        bool held = false;
+        bool buffered = false;
+    };
+    Rules m_rules;
+    State m_state;
+    std::vector<State> m_snaps;
+    std::vector<bool> m_live;
+};
+
+Event replayChain(ChainSim::Rules rules, std::vector<uint8_t> const& bits) {
+    ChainSim sim(rules);
+    InputFn input = [&](int t, Mode) { return t < static_cast<int>(bits.size()) && bits[t]; };
+    SampleFn sample = [](int, Sample const&) {};
+    return sim.run(rules.end + 10, input, sample).event;
+}
+
 char const* styleName(PlayStyle s) {
     switch (s) {
         case PlayStyle::Default: return "Default";
@@ -560,6 +663,130 @@ int main() {
             std::printf("stale plan %-24s %-8s %s (%d of the seeds needed a fresh plan)\n",
                 level.name.c_str(), styleName(style), failed == 0 ? "ok" : "FAILED", stuckFirst);
             if (failed) failures++;
+        }
+    }
+
+    // Orb chains: the first orb alone makes things worse, the second one saves it.
+    {
+        std::vector<std::pair<char const*, ChainSim::Rules>> chains;
+        chains.push_back({ "orb chain", ChainSim::Rules{} });
+        ChainSim::Rules tight;
+        tight.aFrom = 60;
+        tight.aTo = 66;
+        tight.bFrom = 30;
+        tight.bTo = 36;
+        tight.downDies = 112;
+        tight.upDies = 44;
+        chains.push_back({ "tight orb chain", tight });
+        ChainSim::Rules dead;
+        dead.bFrom = 50;
+        dead.bTo = 60; // B only after being up already killed the player
+        chains.push_back({ "orb chain, no way out", dead });
+
+        for (auto const& [name, rules] : chains) {
+            bool const solvable = rules.bFrom < rules.upDies;
+            for (PlayStyle style : styles) {
+                for (bool robust : { true, false }) {
+                    ChainSim sim(rules);
+                    bool ok = false;
+                    {
+                        PlannerConfig config = PlannerConfig::forStyle(style, 21);
+                        config.robust = robust;
+                        Planner planner(sim, config, false);
+                        long steps = 0;
+                        while (planner.step() == Planner::Status::Running) {
+                            if (++steps > 2000000) break;
+                        }
+                        if (solvable) {
+                            ok = planner.status() == Planner::Status::Completed &&
+                                replayChain(rules, planner.inputs()) == Event::Completed;
+                        }
+                        else {
+                            ok = planner.status() == Planner::Status::Stuck;
+                        }
+                    }
+                    if (sim.liveSnapshots() != 0) ok = false;
+                    std::printf("%-24s %-8s %-6s %s\n", name, styleName(style), robust ? "robust" : "exact", ok ? "ok" : "FAILED");
+                    if (!ok) failures++;
+                }
+            }
+        }
+    }
+
+    // The same chains through the bot's loop: every 16 ticks plan 200 ahead from the real
+    // state with the next 12 fixed, following the previous plan first, then from scratch,
+    // then with exact timings.
+    {
+        std::vector<std::pair<char const*, ChainSim::Rules>> chains;
+        chains.push_back({ "orb chain", ChainSim::Rules{} });
+        ChainSim::Rules late;
+        late.aFrom = 230;
+        late.aTo = 242;
+        late.downDies = 300;
+        late.end = 700;
+        chains.push_back({ "late orb chain", late });
+        for (auto const& [name, rules] : chains) {
+            for (PlayStyle style : styles) {
+                constexpr int kHorizon = 200;
+                constexpr int kFloor = 12;
+                constexpr int kEvery = 16;
+                ChainSim real(rules);
+                std::vector<uint8_t> plan;
+                int planEnd = 0;
+                int lastCheck = -1000000;
+                bool held = false;
+                Event outcome = Event::None;
+                bool leaked = false;
+                while (outcome == Event::None && real.tick() < rules.end + 50) {
+                    int const t0 = real.tick();
+                    if (t0 - lastCheck >= kEvery || planEnd < t0 + kHorizon / 2) {
+                        std::vector<uint8_t> seed;
+                        for (int t = t0; t < planEnd && t < static_cast<int>(plan.size()); ++t) seed.push_back(plan[t]);
+                        for (int attempt = 0; attempt < 3; ++attempt) {
+                            ChainSim sim(rules);
+                            // Bring the copy to the real state by replaying what was played.
+                            InputFn replayInput = [&](int t, Mode) { return t < static_cast<int>(plan.size()) && plan[t]; };
+                            SampleFn none = [](int, Sample const&) {};
+                            if (t0 > 0) sim.run(t0, replayInput, none);
+                            PlannerConfig config = PlannerConfig::forStyle(style, 5 + attempt);
+                            config.goalTicks = t0 + kHorizon;
+                            config.robust = attempt < 2;
+                            std::vector<uint8_t> useSeed(seed.begin(), seed.begin() + std::min<size_t>(seed.size(), attempt == 0 ? seed.size() : kFloor));
+                            // The planner works in absolute ticks here; pad the seed to the start.
+                            std::vector<uint8_t> full(plan.begin(), plan.begin() + std::min<size_t>(plan.size(), t0));
+                            full.resize(t0, 0);
+                            full.insert(full.end(), useSeed.begin(), useSeed.end());
+                            bool stuck = false;
+                            {
+                                Planner planner(sim, config, held, full, t0 + kFloor);
+                                while (planner.step() == Planner::Status::Running) {}
+                                stuck = planner.status() == Planner::Status::Stuck;
+                                if (!stuck || attempt == 2) {
+                                    int end = stuck ? planner.bestFrontier() : planner.endTick();
+                                    end = std::min<int>(end, static_cast<int>(planner.inputs().size()));
+                                    if (static_cast<int>(plan.size()) < end) plan.resize(end, 0);
+                                    for (int t = t0 + kFloor; t < end; ++t) plan[t] = planner.inputs()[t];
+                                    planEnd = std::max(planEnd, end);
+                                }
+                            }
+                            if (sim.liveSnapshots() != 0) leaked = true;
+                            if (!stuck) break;
+                        }
+                        lastCheck = t0;
+                    }
+                    for (int i = 0; i < 4 && outcome == Event::None; ++i) {
+                        int const t = real.tick();
+                        bool const want = t < planEnd && t < static_cast<int>(plan.size()) && plan[t];
+                        held = want;
+                        InputFn input = [want](int, Mode) { return want; };
+                        SampleFn sample = [](int, Sample const&) {};
+                        outcome = real.run(t + 1, input, sample).event;
+                    }
+                }
+                bool const ok = outcome == Event::Completed && !leaked;
+                std::printf("pilot %-24s %-8s %s\n", name, styleName(style), ok ? "ok" : "FAILED");
+                if (!ok) failures++;
+            }
         }
     }
 

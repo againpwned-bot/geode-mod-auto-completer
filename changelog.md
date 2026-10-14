@@ -1,3 +1,8 @@
+# v1.3.5
+- Fix: the bot skipped the second orb in orb chains (like the gravity orbs on "I Spy"). It only took a click that kept the player alive longer, but there the first orb on its own makes things worse and only the second orb saves you. The planner now tries an orb click that changes how the player would die and looks for the follow-up click from there (at most two in a row, and it backs out if no follow-up works).
+- The measured move scale ignores noise: GD moves groups by exactly their trigger offset, so small wobbles in the measurement no longer stretch predictions. The log line no longer repeats.
+- New tests: orb chains for every play style, through the bot's own planning loop.
+
 # v1.3.4
 - Moving objects follow their move triggers: the bot reads each move as GD starts it (offset, duration, easing, lock to player or camera), so it knows where a moving hazard or platform stops instead of assuming it keeps going.
 - Traps that haven't started moving yet: the simulation starts the move triggers the player will pass, directly or through a spawn trigger with its delay, so the bot sees them coming.

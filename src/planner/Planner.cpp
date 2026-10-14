@@ -387,13 +387,26 @@ void Planner::stepFix() {
             fix.firstValid = tick;
         }
         fix.invalidStreak = 0;
+        return;
     }
-    else if (fix.firstValid >= 0) {
+    if (fix.firstValid >= 0) {
         fix.invalidStreak += 1;
+    }
+    // An orb click that ends differently, with room left for another click before that end.
+    if (m_cfg.exploreDepth > 0 && survival != 0 && fix.deathTick + survival - tick >= m_cfg.exploreRoom &&
+        this->ringAt(tick)) {
+        fix.explore.push_back(Candidate{ tick, decision, survival });
     }
 }
 
-bool Planner::robustAt(Candidate const& c) {
+bool Planner::ringAt(int tick) const {
+    auto touching = [this](int t) {
+        return t >= 0 && t < static_cast<int>(m_samples.size()) && m_samples[t].ring;
+    };
+    return touching(tick) || touching(tick - 1);
+}
+
+bool Planner::robustAt(Candidate const& c, bool explore) {
     // A neighbour has to do about as well as the candidate itself: just outliving the old
     // death by a few ticks could still mean landing on the next spike.
     int const need = std::max(m_cfg.horizonMin, std::min(c.survival, m_cfg.horizonMax) - 3);
@@ -404,9 +417,74 @@ bool Planner::robustAt(Candidate const& c) {
         if (held != current) continue;
         int const survival = this->evaluate(neighbour, c.decision, m_fix.deathTick);
         this->note(TraceEntry::Kind::Eval, neighbour, survival);
-        if (survival < need) return false;
+        if (explore ? std::abs(survival - c.survival) > 2 : survival < need) return false;
     }
     return true;
+}
+
+void Planner::chooseExplore(std::vector<Candidate> explore) {
+    // Clicks that end the same way form windows; the middle of the longest one is the
+    // click that still ends that way a tick earlier or later.
+    std::sort(explore.begin(), explore.end(), [](Candidate const& a, Candidate const& b) {
+        return a.tick < b.tick;
+    });
+    int const gap = std::max(m_cfg.scanStride, 1);
+    size_t bestFrom = 0;
+    size_t bestTo = 0;
+    size_t runFrom = 0;
+    for (size_t i = 1; i <= explore.size(); ++i) {
+        bool const broken = i == explore.size() || explore[i].tick - explore[i - 1].tick > gap ||
+            std::abs(explore[i].survival - explore[runFrom].survival) > 2;
+        if (!broken) continue;
+        size_t const runTo = i - 1;
+        int const length = explore[runTo].tick - explore[runFrom].tick;
+        int const bestLength = explore[bestTo].tick - explore[bestFrom].tick;
+        if (length > bestLength ||
+            (length == bestLength && explore[runFrom].survival > explore[bestFrom].survival)) {
+            bestFrom = runFrom;
+            bestTo = runTo;
+        }
+        runFrom = i;
+    }
+    double const target = (explore[bestFrom].tick + explore[bestTo].tick) / 2.0;
+
+    std::vector<Candidate> ordered(explore.begin() + bestFrom, explore.begin() + bestTo + 1);
+    std::vector<Candidate> rest(explore.begin(), explore.begin() + bestFrom);
+    rest.insert(rest.end(), explore.begin() + bestTo + 1, explore.end());
+    std::sort(ordered.begin(), ordered.end(), [target](Candidate const& a, Candidate const& b) {
+        return std::abs(a.tick - target) < std::abs(b.tick - target);
+    });
+    std::sort(rest.begin(), rest.end(), [target](Candidate const& a, Candidate const& b) {
+        if (a.survival != b.survival) return a.survival > b.survival;
+        return std::abs(a.tick - target) < std::abs(b.tick - target);
+    });
+    ordered.insert(ordered.end(), rest.begin(), rest.end());
+
+    auto pick = ordered.begin();
+    if (m_cfg.robust) {
+        pick = std::find_if(ordered.begin(), ordered.end(), [this](Candidate const& c) {
+            return this->robustAt(c, true);
+        });
+        if (pick == ordered.end()) {
+            this->backtrack();
+            return;
+        }
+    }
+    Candidate chosen = *pick;
+    ordered.erase(pick);
+
+    this->applyDecision(chosen.tick, chosen.decision);
+    this->note(TraceEntry::Kind::Explore, chosen.tick);
+
+    StackEntry entry;
+    entry.tick = chosen.tick;
+    entry.decision = chosen.decision;
+    entry.alternatives = std::move(ordered);
+    entry.deathTick = m_fix.deathTick;
+    entry.lo = m_fix.lo;
+    entry.scanNext = m_fix.next;
+    entry.explore = true;
+    m_stack.push_back(std::move(entry));
 }
 
 bool Planner::canPressAt(int tick) const {
@@ -446,10 +524,20 @@ int Planner::evaluate(int tick, Decision const& decision, int deathTick) {
 void Planner::finishFix() {
     m_fix.active = false;
     auto valid = std::move(m_fix.valid);
+    auto explore = std::move(m_fix.explore);
     m_fix.valid.clear();
+    m_fix.explore.clear();
 
     if (valid.empty()) {
-        this->backtrack();
+        auto const depth = std::count_if(m_stack.begin(), m_stack.end(), [](StackEntry const& entry) {
+            return entry.explore;
+        });
+        if (explore.empty() || depth >= m_cfg.exploreDepth) {
+            this->backtrack();
+        }
+        else {
+            this->chooseExplore(std::move(explore));
+        }
         return;
     }
 
@@ -527,7 +615,7 @@ void Planner::finishFix() {
         // the real game can't kill and the next obstacle keeps some room. Only the best
         // candidates are checked, in order, to keep this cheap.
         pick = std::find_if(ordered.begin(), ordered.end(), [this](Candidate const& c) {
-            return this->robustAt(c);
+            return this->robustAt(c, false);
         });
         if (pick == ordered.end()) {
             this->backtrack();
