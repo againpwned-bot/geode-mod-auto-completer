@@ -72,6 +72,8 @@ struct PlayerFix {
     bool valid = false;
     cocos2d::CCPoint nodePosition;
     float rotation = 0.f;
+    // Game mode; apply() leaves it alone, switching modes takes GD's toggles.
+    Mode mode = Mode::Cube;
 
 #define AC_DECLARE_FIELD(name) std::remove_cvref_t<decltype(std::declval<PlayerObject&>().name)> name {};
     AC_PLAYER_FIELDS(AC_DECLARE_FIELD)

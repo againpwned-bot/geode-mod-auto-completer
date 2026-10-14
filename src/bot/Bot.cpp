@@ -26,6 +26,20 @@ namespace {
     std::string percent(float value) {
         return fmt::format("{:.0f}%", value * 100.f);
     }
+
+    char const* modeName(Mode mode) {
+        switch (mode) {
+            case Mode::Cube: return "cube";
+            case Mode::Ship: return "ship";
+            case Mode::Ball: return "ball";
+            case Mode::Ufo: return "ufo";
+            case Mode::Wave: return "wave";
+            case Mode::Robot: return "robot";
+            case Mode::Spider: return "spider";
+            case Mode::Swing: return "swing";
+        }
+        return "?";
+    }
 }
 
 Bot& Bot::get() {
@@ -119,6 +133,7 @@ void Bot::resetAttempt() {
     m_tickOpen = false;
     m_stepIndex = 0;
     m_seenStep = false;
+    m_movementKnown = false;
     ObjectTracker::get().resetAttempt();
     m_shadowValid = false;
     m_deathPending = false;
@@ -140,6 +155,7 @@ void Bot::onLevelInit(PlayLayer* layer) {
     m_model = PhysicsModel{};
     m_probe = InlineProbe{};
     m_shadowLogged = 0;
+    m_surprisesLogged = 0;
     m_shadowInputLogged = 0;
     m_shadowInputTicks = 0;
     m_shadowInputMismatches = 0;
@@ -233,10 +249,16 @@ void Bot::onFrame(PlayLayer* layer) {
 
     if (m_state != BotState::Playing || !this->readyToPlay(layer)) return;
 
-    if (!FakeWorld::get().player()) {
+    PlayerObject* const hidden = FakeWorld::get().player();
+    if (!FakeWorld::get().ensure(layer)) {
         m_state = BotState::Unsupported;
         this->setStatus("Could not create the simulation player");
         return;
+    }
+    if (FakeWorld::get().player() != hidden) {
+        // Anything still simulating used the old hidden player.
+        m_check.reset();
+        m_calibration = Calibration{};
     }
     // The first real ticks tell us which physics calls GD makes per tick.
     auto& recorder = TickRecorder::get();
@@ -251,11 +273,17 @@ void Bot::onFrame(PlayLayer* layer) {
 
     // Index of the physics step that runs next (see beforeTick).
     unsigned const now = m_stepIndex;
-    auto const budget = std::chrono::microseconds(std::clamp<int64_t>(settings::liveBudget(), 1, 30) * 1000);
-    auto const deadline = std::chrono::steady_clock::now() + budget;
 
-    if (m_check && now >= m_check->t0 + kFloor) {
-        // Too slow to finish before its fixed part ran out; start over from here.
+    // The real player went through something the plan didn't see coming (a gravity, dual or
+    // teleport portal, or a mode change the simulation missed): plan again right away from
+    // its new state, free to change even the next tick, and within this frame.
+    bool const urgent = this->movementSurprise(layer, now);
+    int64_t const budgetMs = std::clamp<int64_t>(settings::liveBudget(), 1, 30) * (urgent ? 3 : 1);
+    auto const deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+
+    if (m_check && (urgent || now >= m_check->t0 + m_check->floor)) {
+        // Planning from an outdated state, or too slow to finish before its fixed part ran
+        // out; start over from here.
         m_check.reset();
         m_forceCheck = true;
     }
@@ -268,38 +296,77 @@ void Bot::onFrame(PlayLayer* layer) {
         static_cast<int>(now) - m_lastCheck >= kEvery ||
         m_planEnd < static_cast<int>(now) + kHorizon / 2;
     if (!m_check && due) {
-        this->startCheck(layer, now);
+        this->startCheck(layer, now, urgent ? 0 : kFloor);
     }
 
     if (m_check) {
         m_check->sim->beginSlice();
-        Planner::Status status;
-        do {
-            status = m_check->planner->step();
-        } while (status == Planner::Status::Running && std::chrono::steady_clock::now() < deadline);
+        while (true) {
+            Planner::Status status;
+            do {
+                status = m_check->planner->step();
+            } while (status == Planner::Status::Running && std::chrono::steady_clock::now() < deadline);
 
-        bool const freshPlan = status == Planner::Status::Stuck && m_check->seeded && !m_check->retried;
-        bool const exactPlan = status == Planner::Status::Stuck && !freshPlan && m_check->config.robust;
-        if (freshPlan || exactPlan) {
+            if (status == Planner::Status::Running) {
+                m_check->sim->endSlice();
+                break;
+            }
+            bool const freshPlan = status == Planner::Status::Stuck && m_check->seeded && !m_check->retried;
+            bool const exactPlan = status == Planner::Status::Stuck && !freshPlan && m_check->config.robust;
+            if (!freshPlan && !exactPlan) {
+                this->finishCheck();
+                break;
+            }
             // The search can only move the previous plan's jumps earlier, so first plan this
             // stretch again from scratch; if even that needs frame-perfect timing, allow it.
             this->retryCheck(!exactPlan);
-            m_check->sim->endSlice();
-        }
-        else if (status != Planner::Status::Running) {
-            this->finishCheck();
-        }
-        else {
-            m_check->sim->endSlice();
+            if (std::chrono::steady_clock::now() >= deadline) {
+                m_check->sim->endSlice();
+                break;
+            }
         }
     }
 
     m_stats.plannedAhead = std::max(0, m_planEnd - static_cast<int>(now));
 }
 
-void Bot::startCheck(PlayLayer* layer, unsigned now) {
+bool Bot::movementSurprise(PlayLayer* layer, unsigned now) {
+    auto* player = layer->m_player1;
+    Mode const mode = modeOf(player);
+    bool const upsideDown = player->m_isUpsideDown;
+    bool const dual = layer->m_gameState.m_isDualMode;
+    int const signature = static_cast<int>(mode) | (upsideDown ? 16 : 0) | (dual ? 32 : 0);
+    bool const changed = m_movementKnown && signature != m_movement;
+    int const previous = m_movement;
+    m_movement = signature;
+    m_movementKnown = true;
+    if (!changed || now == 0) return false;
+
+    // Did the plan see it coming? Gravity orbs and pads are GD's own physics, so a predicted
+    // flip is exact; a new game mode comes from the bot's portal handling, so the plan is
+    // redone from the real state even when it expected it.
+    int const last = static_cast<int>(now) - 1;
+    bool predicted = false;
+    if (last < m_planEnd && last < static_cast<int>(m_samples.size())) {
+        auto const& sample = m_samples[last];
+        predicted = sample.mode == mode && sample.upsideDown == upsideDown && !dual;
+    }
+    bool const modeChanged = (previous & 15) != static_cast<int>(mode);
+    if (predicted && !modeChanged) return false;
+    if (m_surprisesLogged < 6) {
+        m_surprisesLogged += 1;
+        log::info(
+            "Tick {}: player is now {}{}{}; planning again right away", now, modeName(mode),
+            upsideDown ? ", upside down" : "", dual ? ", dual" : ""
+        );
+    }
+    return true;
+}
+
+void Bot::startCheck(PlayLayer* layer, unsigned now, int floor) {
     auto check = std::make_unique<Check>();
     check->t0 = now;
+    check->floor = floor;
 
     std::vector<uint8_t> seed;
     int const end = std::min<int>(m_planEnd, static_cast<int>(m_inputs.size()));
@@ -308,7 +375,7 @@ void Bot::startCheck(PlayLayer* layer, unsigned now) {
     }
     check->seedSize = static_cast<int>(seed.size());
     check->initialHold = m_appliedHold;
-    for (int t = std::min(kFloor, check->seedSize); t < check->seedSize; ++t) {
+    for (int t = std::min(floor, check->seedSize); t < check->seedSize; ++t) {
         bool const previous = t == 0 ? m_appliedHold : seed[t - 1] != 0;
         if ((seed[t] != 0) != previous) {
             check->seeded = true;
@@ -326,7 +393,7 @@ void Bot::startCheck(PlayLayer* layer, unsigned now) {
     config.goalTicks = kHorizon;
     config.robust = true;
     check->config = config;
-    check->planner = std::make_unique<Planner>(*check->sim, config, m_appliedHold, std::move(seed), kFloor);
+    check->planner = std::make_unique<Planner>(*check->sim, config, m_appliedHold, std::move(seed), floor);
 
     m_check = std::move(check);
     m_lastCheck = static_cast<int>(now);
@@ -354,9 +421,11 @@ void Bot::retryCheck(bool robust) {
     check.planner.reset();
 
     // Only the fixed part (the floor) of the previous plan is kept.
-    std::vector<uint8_t> seed(check.seed.begin(), check.seed.begin() + std::min<size_t>(kFloor, check.seed.size()));
+    std::vector<uint8_t> seed(
+        check.seed.begin(), check.seed.begin() + std::min<size_t>(static_cast<size_t>(check.floor), check.seed.size())
+    );
     check.config.robust = robust;
-    check.planner = std::make_unique<Planner>(*check.sim, check.config, check.initialHold, std::move(seed), kFloor);
+    check.planner = std::make_unique<Planner>(*check.sim, check.config, check.initialHold, std::move(seed), check.floor);
     check.retried = true;
 }
 
@@ -459,7 +528,7 @@ void Bot::finishCheck() {
     end = std::max(end, 0);
 
     // Ticks before `from` are either already decided or were played exactly as planned.
-    int const from = std::min(kFloor, check.seedSize);
+    int const from = std::min(check.floor, check.seedSize);
     size_t const need = static_cast<size_t>(check.t0) + static_cast<size_t>(end);
     if (m_inputs.size() < need) {
         m_inputs.resize(need, 0);
@@ -732,9 +801,10 @@ void Bot::runShadow(PlayLayer* layer) {
     if (m_stats.shadowTicks % 1200 == 0) {
         log::info(
             "Tick checks: {} ticks, {} differ; press/release ticks: {}, {} differ; moving objects: {} of {}, "
-            "trigger moves: {}",
+            "trigger moves: {}, group toggles: {}",
             m_stats.shadowTicks, m_stats.shadowMismatches, m_shadowInputTicks, m_shadowInputMismatches,
-            ObjectTracker::get().movingCount(), ObjectTracker::get().size(), ObjectTracker::get().commands().size()
+            ObjectTracker::get().movingCount(), ObjectTracker::get().size(), ObjectTracker::get().commands().size(),
+            ObjectTracker::get().toggleCount()
         );
     }
 }
@@ -836,9 +906,17 @@ void Bot::logDeath(FakeSim const& sim) {
     auto const& d = sim.lastDeath();
     if (!d.valid) return;
     float const realX = m_layer && m_layer->m_player1 ? m_layer->m_player1->getPositionX() : 0.f;
+    // Why the killer was there: where it is now, and what moves or switches it.
+    std::string why;
+    if (auto* object = d.object) {
+        why = fmt::format(
+            " (now at ({:.1f},{:.1f}){}; {})", object->m_positionX, object->m_positionY,
+            d.switchedOn ? ", switched on by a toggle the simulation expects" : "", ObjectTracker::get().describe(object)
+        );
+    }
     log::info(
-        "Simulation died {} ticks ahead at ({:.1f},{:.1f}) by obj {} type {} at ({:.1f},{:.1f}); real player at x {:.1f}",
-        d.tick, d.x, d.y, d.objectId, d.objectType, d.objectX, d.objectY, realX
+        "Simulation died {} ticks ahead at ({:.1f},{:.1f}) by obj {} type {} at ({:.1f},{:.1f}){}; real player at x {:.1f}",
+        d.tick, d.x, d.y, d.objectId, d.objectType, d.objectX, d.objectY, why, realX
     );
 }
 

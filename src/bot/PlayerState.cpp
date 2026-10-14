@@ -90,6 +90,7 @@ void PlayerFix::capture(PlayerObject* player) {
 
     nodePosition = player->getPosition();
     rotation = player->getRotation();
+    mode = modeOf(player);
 #define AC_CAPTURE_FIELD(name) name = player->name;
     AC_PLAYER_FIELDS(AC_CAPTURE_FIELD)
 #undef AC_CAPTURE_FIELD
@@ -114,6 +115,9 @@ std::string PlayerFix::diff(PlayerFix const& other, size_t limit, size_t* count)
         if (!out.empty()) out += ", ";
         out += fmt::format("{} {}/{}", name, mine, theirs);
     };
+    if (mode != other.mode) {
+        add("mode", std::to_string(static_cast<int>(mode)), std::to_string(static_cast<int>(other.mode)));
+    }
     if (!sameValue(nodePosition, other.nodePosition)) {
         add("node", showValue(nodePosition), showValue(other.nodePosition));
     }

@@ -13,7 +13,8 @@ A pathfinding bot for **Geometry Dash 2.2081** on **Geode v5**. It plays levels 
 
   A click only counts if the same click one tick earlier and later also works, so a small timing error can't kill. Cube, robot, ball and spider only press where a press does something (on the ground or on an orb). If nothing in the window works, the planner may take an orb click that only changes how the player would die and look for the follow-up click from there (orb chains, like a gravity orb up and another one back down), at most two in a row. Otherwise it backtracks to earlier decisions; if the previous plan led into a dead end, the stretch is planned again from scratch. The next 12 ticks are always fixed, so the bot never changes an input it is about to play.
 - **Moving objects.** Every move trigger GD starts is recorded (offset, duration, easing, lock to player), and the simulation starts the move triggers the player will pass, directly or through a spawn trigger. The hidden player meets moving hazards and platforms where they will be.
-- **Portals.** Speed and size portals are applied to the hidden player. Mode, gravity, dual and teleport portals end the look-ahead: the bot plans up to the portal and continues from the real player's new state once it is through.
+- **Toggles.** Toggle triggers the player passes (directly or through a spawn trigger) switch their groups on or off in the simulation too, so a hazard that is about to appear is seen in time.
+- **Portals.** Speed, size and mode portals are applied to the hidden player, so the bot plans through them. Gravity, dual and teleport portals end the look-ahead: the bot plans up to the portal and plans again from the real player's new state the moment it is through (it does the same after every mode change, free to change even the next tick).
 
 The planner (`src/planner`) and the move model (`src/bot/Motion.hpp`) have no Geode dependencies. CI runs three native test suites with sanitizers on every push:
 - `tests/planner_test.cpp`: the planner against a toy physics model, including the exact look-ahead loop the game uses and orb chains.
@@ -43,5 +44,6 @@ g++ -std=c++20 -O2 -I src tests/motion_test.cpp -o motion_test && ./motion_test
 
 ## Limitations
 - Classic levels only (no platformer or 2-player yet).
-- After a mode portal the first plan only starts once the real player is through it, and flying modes use the game's current floor and ceiling.
+- Past a mode portal the simulation keeps the game's current floor and ceiling (a new ship or ball corridor only exists once the real player is through), and gravity, dual and teleport portals end the look-ahead; the bot plans again from the real player the moment it is through.
+- Toggles: toggle triggers the player passes and toggle orbs are simulated; groups switched by touch, collision, count or item triggers are only seen once they happen.
 - Moving objects: groups moved by move triggers are placed exactly (offset, duration, easing, lock to player), including move triggers the player starts by passing them, directly or through a spawn trigger. Anything else that moves (follow, rotate, keyframe and area triggers, move-to-target, chained or remapped spawns, touch or collision triggers) is extrapolated from its current speed, and re-checking every 16 ticks corrects most of the rest.

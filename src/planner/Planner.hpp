@@ -44,6 +44,7 @@ struct Sample {
     bool hold = false;
     Mode mode = Mode::Cube;
     bool grounded = false; // standing on something after this tick
+    bool upsideDown = false;
     bool ring = false;     // overlapping an orb during this tick
 };
 

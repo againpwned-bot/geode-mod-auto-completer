@@ -165,6 +165,8 @@ bool FakeWorld::attach(PlayLayer* layer) {
     player->m_playEffects = false;
     container->addChild(player);
 
+    // Kept alive by us too, so it stays valid even if the level drops it first.
+    container->retain();
     m_layer = layer;
     m_container = container;
     m_player = player;
@@ -174,9 +176,27 @@ bool FakeWorld::attach(PlayLayer* layer) {
 void FakeWorld::detach(PlayLayer* layer) {
     if (!m_container || layer != m_layer) return;
     m_container->removeFromParent();
+    m_container->release();
     m_container = nullptr;
     m_player = nullptr;
     m_layer = nullptr;
+}
+
+bool FakeWorld::ensure(PlayLayer* layer) {
+    if (!layer) return false;
+    bool const attached = m_layer == layer && m_player && m_container &&
+        m_container->getParent() == layer->m_objectLayer;
+    if (attached) return true;
+    log::info("Creating the hidden player for this level again");
+    if (m_container && m_layer != layer) {
+        // Belongs to a level that is gone; just let go of it.
+        m_container->removeFromParent();
+        m_container->release();
+        m_container = nullptr;
+        m_player = nullptr;
+        m_layer = nullptr;
+    }
+    return this->attach(layer);
 }
 
 FakeSim::FakeSim(
@@ -192,6 +212,8 @@ FakeSim::FakeSim(
     if (!real || !m_fake) return;
 
     m_fake->copyAttributes(real);
+    // An earlier simulation may have left the hidden player in another mode.
+    setMode(m_fake, from ? from->mode : modeOf(real));
     if (from) {
         from->apply(m_fake);
     }
@@ -208,7 +230,7 @@ FakeSim::FakeSim(
 }
 
 FakeSim::~FakeSim() {
-    ObjectTracker::restore(m_moved);
+    this->restoreObjects();
     if (m_inSlice) {
         this->restoreBaseline();
     }
@@ -244,7 +266,7 @@ void FakeSim::noteObject(GameObject* object) {
 }
 
 namespace {
-    enum class PortalKind { None, Speed, Size, Gravity, Goal };
+    enum class PortalKind { None, Speed, Size, Gravity, Mode, Goal };
 
     PortalKind portalKind(GameObject* object, float& speed) {
         switch (object->m_objectType) {
@@ -263,6 +285,7 @@ namespace {
             case GameObjectType::RobotPortal:
             case GameObjectType::SpiderPortal:
             case GameObjectType::SwingPortal:
+                return PortalKind::Mode;
             case GameObjectType::DualPortal:
             case GameObjectType::SoloPortal:
             case GameObjectType::TeleportPortal:
@@ -278,6 +301,19 @@ namespace {
                 }
             default:
                 return PortalKind::None;
+        }
+    }
+
+    Mode portalMode(GameObjectType type) {
+        switch (type) {
+            case GameObjectType::ShipPortal: return Mode::Ship;
+            case GameObjectType::BallPortal: return Mode::Ball;
+            case GameObjectType::UfoPortal: return Mode::Ufo;
+            case GameObjectType::WavePortal: return Mode::Wave;
+            case GameObjectType::RobotPortal: return Mode::Robot;
+            case GameObjectType::SpiderPortal: return Mode::Spider;
+            case GameObjectType::SwingPortal: return Mode::Swing;
+            default: return Mode::Cube;
         }
     }
 
@@ -339,6 +375,15 @@ void FakeSim::notePortal(GameObject* object) {
             }
             break;
         }
+        case PortalKind::Mode:
+            if (changesMode(object->m_objectType, m_fake)) {
+                setMode(m_fake, portalMode(object->m_objectType));
+                // What GD records about the portal on the player.
+                m_fake->m_lastPortalPos = ccp(object->m_positionX, object->m_positionY);
+                m_fake->m_lastActivatedPortal = object;
+                m_fake->m_gameModeChangedTime = m_fake->m_totalTime;
+            }
+            break;
         case PortalKind::Goal:
             if (changesMode(object->m_objectType, m_fake)) {
                 m_reachedGoal = true;
@@ -346,6 +391,31 @@ void FakeSim::notePortal(GameObject* object) {
             break;
         case PortalKind::None:
             break;
+    }
+}
+
+void FakeSim::setMode(PlayerObject* player, Mode mode) {
+    if (!player || modeOf(player) == mode) return;
+    // Leave the current mode, then enter the new one, the way the mode toggles expect.
+    switch (modeOf(player)) {
+        case Mode::Ship: player->toggleFlyMode(false, true); break;
+        case Mode::Ufo: player->toggleBirdMode(false, true); break;
+        case Mode::Wave: player->toggleDartMode(false, true); break;
+        case Mode::Ball: player->toggleRollMode(false, true); break;
+        case Mode::Robot: player->toggleRobotMode(false, true); break;
+        case Mode::Spider: player->toggleSpiderMode(false, true); break;
+        case Mode::Swing: player->toggleSwingMode(false, true); break;
+        case Mode::Cube: break;
+    }
+    switch (mode) {
+        case Mode::Ship: player->toggleFlyMode(true, true); break;
+        case Mode::Ufo: player->toggleBirdMode(true, true); break;
+        case Mode::Wave: player->toggleDartMode(true, true); break;
+        case Mode::Ball: player->toggleRollMode(true, true); break;
+        case Mode::Robot: player->toggleRobotMode(true, true); break;
+        case Mode::Spider: player->toggleSpiderMode(true, true); break;
+        case Mode::Swing: player->toggleSwingMode(true, true); break;
+        case Mode::Cube: break;
     }
 }
 
@@ -380,7 +450,9 @@ int FakeSim::save() {
     slot.tick = m_tick;
     slot.portals = m_portalsUsed;
     slot.moves = m_moves;
+    slot.toggles = m_toggles;
     slot.pendingSpeed = m_pendingSpeed;
+    slot.mode = modeOf(m_fake);
     slot.flags.reserve(m_log.size());
     for (auto const& entry : m_log) {
         slot.flags.push_back(read(entry.object));
@@ -410,6 +482,8 @@ void FakeSim::load(int handle) {
     if (reattributeOnLoad() && m_layer && m_layer->m_player1) {
         m_fake->copyAttributes(m_layer->m_player1);
     }
+    // Mode first: switching modes changes physics fields the snapshot then overwrites.
+    setMode(m_fake, slot.mode);
     slot.fix.apply(m_fake);
     m_fake->m_isDead = false;
     m_held = slot.held;
@@ -417,6 +491,7 @@ void FakeSim::load(int handle) {
     m_tick = slot.tick;
     m_portalsUsed = slot.portals;
     m_moves = slot.moves;
+    m_toggles = slot.toggles;
     m_pendingSpeed = slot.pendingSpeed;
     m_triggerX = m_fake->getPositionX();
     m_reachedGoal = false;
@@ -472,8 +547,32 @@ bool FakeSim::placeObject(GameObject* object) {
     auto& track = tracker.observe(object);
     if (track.placed == m_stamp) return false;
     track.placed = m_stamp;
-    tracker.predict(object, track, this->placeContext(), m_moved);
+    auto const context = this->placeContext();
+    tracker.predict(object, track, context, m_moved);
+
+    // Switched on or off by a toggle trigger before this tick.
+    int const enabled = tracker.enabledAt(object, context.step, &m_toggles);
+    if (enabled >= 0 && object->m_isGroupDisabled != (enabled == 0)) {
+        m_switched.emplace_back(object, object->m_isGroupDisabled);
+        object->m_isGroupDisabled = enabled == 0;
+    }
     return true;
+}
+
+void FakeSim::noteToggle(int group, bool on) {
+    ObjectTracker::Toggle toggle;
+    toggle.group = group;
+    toggle.step = this->absoluteStep();
+    toggle.on = on;
+    m_toggles.push_back(toggle);
+}
+
+void FakeSim::restoreObjects() {
+    ObjectTracker::restore(m_moved);
+    for (auto it = m_switched.rbegin(); it != m_switched.rend(); ++it) {
+        it->first->m_isGroupDisabled = it->second;
+    }
+    m_switched.clear();
 }
 
 void FakeSim::collideMovingHazards(float dt) {
@@ -526,6 +625,14 @@ void FakeSim::collideMovingHazards(float dt) {
     };
     for (auto const& command : tracker.commands()) addGroup(command);
     for (auto const& command : m_moves) addGroup(command);
+    // And of groups switched on by then.
+    auto addToggled = [&](ObjectTracker::Toggle const& toggle) {
+        if (!toggle.on || toggle.step <= world || toggle.step >= step) return;
+        if (std::find(groups.begin(), groups.end(), toggle.group) != groups.end()) return;
+        groups.push_back(toggle.group);
+    };
+    for (auto const& toggle : tracker.expectedToggles()) addToggled(toggle);
+    for (auto const& toggle : m_toggles) addToggled(toggle);
     for (int group : groups) {
         for (auto* object : tracker.groupHazards(m_layer, group)) consider(object, true);
     }
@@ -542,7 +649,7 @@ void FakeSim::passTriggers() {
     auto& tracker = ObjectTracker::get();
     // The real game starts the moves of triggers the real player passes.
     if (this->absoluteStep() > tracker.worldStep()) {
-        tracker.movesBetween(m_layer, m_triggerX, x, this->absoluteStep(), m_moves);
+        tracker.eventsBetween(m_layer, m_triggerX, x, this->absoluteStep(), m_moves, m_toggles);
     }
     m_triggerX = x;
 }
@@ -555,11 +662,14 @@ void FakeSim::stepPhysics() {
     if (ctx.died && ctx.killer) {
         // Where the killer was in this tick, before moved objects go back.
         m_killerPosition = ccp(ctx.killer->m_positionX, ctx.killer->m_positionY);
+        m_killerSwitchedOn = std::any_of(m_switched.begin(), m_switched.end(), [&](auto const& entry) {
+            return entry.first == ctx.killer && entry.second;
+        });
     }
     if (!ctx.died) {
         this->passTriggers();
     }
-    ObjectTracker::restore(m_moved);
+    this->restoreObjects();
 }
 
 void FakeSim::stepPlayer() {
@@ -631,7 +741,7 @@ InlineProbe FakeSim::probeInlines() {
         static uint64_t probes = 0;
         m_stamp = ~++probes;
         this->runOp(op);
-        ObjectTracker::restore(m_moved);
+        this->restoreObjects();
 
         if (!player->m_wasTeleported && !player->m_ringJumpRelated) result.preCollision = true;
         if (!player->m_touchedGravityPortal && !player->m_maybeTouchedBreakableBlock) result.jumpVars = true;
@@ -694,6 +804,7 @@ RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& samp
         s.hold = want;
         s.mode = mode;
         s.grounded = m_fake->m_isOnGround;
+        s.upsideDown = m_fake->m_isUpsideDown;
         s.ring = m_fake->m_touchedRing || (m_fake->m_touchingRings && m_fake->m_touchingRings->count() > 0);
         sample(m_tick, s);
 
@@ -712,6 +823,8 @@ RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& samp
                 m_lastDeath.objectType = static_cast<int>(killer->m_objectType);
                 m_lastDeath.objectX = m_killerPosition.x;
                 m_lastDeath.objectY = m_killerPosition.y;
+                m_lastDeath.object = killer;
+                m_lastDeath.switchedOn = m_killerSwitchedOn;
             }
             break;
         }

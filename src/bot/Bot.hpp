@@ -80,6 +80,7 @@ private:
 
     struct Check {
         unsigned t0 = 0;
+        int floor = 0;          // ticks after t0 the check may not change
         int seedSize = 0;
         std::vector<uint8_t> seed;
         bool initialHold = false;
@@ -104,7 +105,10 @@ private:
     bool readyToPlay(PlayLayer* layer) const;
     void resetAttempt();
     void releaseHold(PlayLayer* layer);
-    void startCheck(PlayLayer* layer, unsigned now);
+    void startCheck(PlayLayer* layer, unsigned now, int floor);
+    // Whether the real player's mode, gravity or dual state changed in a way the plan
+    // didn't predict.
+    bool movementSurprise(PlayLayer* layer, unsigned now);
     void retryCheck(bool robust);
     void finishCheck();
     void logTrace(Planner const& planner, unsigned t0);
@@ -135,6 +139,9 @@ private:
     std::unique_ptr<Check> m_check;
     int m_lastCheck = -1000000;
     bool m_forceCheck = false;
+    int m_movement = 0;
+    bool m_movementKnown = false;
+    int m_surprisesLogged = 0;
     bool m_desyncFlagged = false;
 
     Calibration m_calibration;

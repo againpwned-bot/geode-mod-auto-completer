@@ -283,6 +283,22 @@ class $modify(ACBaseGameLayer, GJBaseGameLayer) {
         GJBaseGameLayer::gameEventTriggered(event, material, playerID);
     }
 
+    void toggleGroup(int id, bool activate) {
+        auto& ctx = ac::fakeContext();
+        if (ctx.active) {
+            // A toggle orb the hidden player touched: only the simulation sees it.
+            if (ctx.sim) ctx.sim->noteToggle(id, activate);
+            return;
+        }
+        if (isCurrentPlayLayer(this)) ac::ObjectTracker::get().onToggle(id, activate);
+        GJBaseGameLayer::toggleGroup(id, activate);
+    }
+
+    void spawnGroup(int group, bool ordered, double delay, gd::vector<int> const& remapKeys, int triggerID, int controlID) {
+        if (simulating()) return;
+        GJBaseGameLayer::spawnGroup(group, ordered, delay, remapKeys, triggerID, controlID);
+    }
+
     void destroyObject(GameObject* object) {
         if (simulating()) return;
         GJBaseGameLayer::destroyObject(object);

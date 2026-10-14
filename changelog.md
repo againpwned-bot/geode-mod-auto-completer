@@ -1,3 +1,10 @@
+# v1.3.6
+- Portals: the hidden player now goes through mode portals (ship, ball, UFO, wave, robot, spider, swing, cube) instead of stopping the look-ahead there, so the bot plans the tight part right after a portal ahead of time.
+- Right after the real player changes mode, or goes through a gravity, dual or teleport portal the plan didn't expect, the bot plans again from its real state at once, free to change even the very next tick (it used to keep the next 12 ticks fixed).
+- Toggle triggers: traps that are switched on or off by toggle triggers the player passes (directly or through a spawn trigger) are simulated, so a hazard that is about to appear is seen in time. Toggle orbs the hidden player touches no longer switch groups in the real level, and spawn orbs no longer fire for real.
+- Fix: after leaving and re-entering a level the bot could stop with "Could not create the simulation player". The hidden player is now re-created whenever it goes missing.
+- Logs: a simulated death says why the killer was there (its groups, the moves and toggles on them, and where it really is now); the level summary lists trigger types the bot doesn't simulate yet; tick checks also compare the game mode.
+
 # v1.3.5
 - Fix: the bot skipped the second orb in orb chains (like the gravity orbs on "I Spy"). It only took a click that kept the player alive longer, but there the first orb on its own makes things worse and only the second orb saves you. The planner now tries an orb click that changes how the player would die and looks for the follow-up click from there (at most two in a row, and it backs out if no follow-up works).
 - The measured move scale ignores noise: GD moves groups by exactly their trigger offset, so small wobbles in the measurement no longer stretch predictions. The log line no longer repeats.

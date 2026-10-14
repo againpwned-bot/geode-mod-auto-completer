@@ -110,6 +110,8 @@ struct DeathInfo {
     int objectType = -1;
     float objectX = 0.f;
     float objectY = 0.f;
+    GameObject* object = nullptr;
+    bool switchedOn = false; // only there because of a toggle the simulation expects
 };
 
 FakeContext& fakeContext();
@@ -122,6 +124,8 @@ public:
 
     bool attach(PlayLayer* layer);
     void detach(PlayLayer* layer);
+    // Attached to `layer`, re-creating the hidden player if it went missing.
+    bool ensure(PlayLayer* layer);
     PlayerObject* player() const { return m_player; }
 
 private:
@@ -161,9 +165,12 @@ public:
 
     // Remembers an orb or pad before the hidden player may activate it.
     void noteObject(GameObject* object);
-    // Portals are applied by hand, never through the game layer: speed and size change
-    // the hidden player; mode, gravity, dual and teleport portals end the look-ahead (the
-    // real player gets there first and later checks continue from its new state).
+    // A toggle orb the hidden player used switches `group` from the next tick on.
+    void noteToggle(int group, bool on);
+    // Portals are applied by hand, never through the game layer: speed, size and mode
+    // portals change the hidden player; gravity, dual and teleport portals end the
+    // look-ahead (the real player gets there first and the bot plans again from its new
+    // state right away).
     void notePortal(GameObject* object);
 
     // Runs each recorded call once with marker values to see which inlined functions it
@@ -203,10 +210,14 @@ private:
         std::vector<Flags> flags;
         std::vector<GameObject*> portals;
         std::vector<MoveCommand> moves;
+        std::vector<ObjectTracker::Toggle> toggles;
         float pendingSpeed = 0.f;
+        Mode mode = Mode::Cube;
         bool used = false;
     };
 
+    // Switches the player's game mode with GD's own toggles (no effects).
+    static void setMode(PlayerObject* player, Mode mode);
     static Flags read(EnhancedGameObject* object);
     static void write(EnhancedGameObject* object, Flags const& flags);
     void restoreBaseline();
@@ -217,6 +228,8 @@ private:
     // collision check doesn't look at yet.
     void collideMovingHazards(float dt);
     ObjectTracker::Context placeContext() const;
+    // Puts every object moved or switched for this tick back.
+    void restoreObjects();
     // Starts the moves of position triggers the hidden player passed this tick.
     void passTriggers();
 
@@ -228,12 +241,16 @@ private:
     std::vector<ObjectTracker::Moved> m_moved;
     // Moves started by triggers the hidden player passed, and how far it has checked.
     std::vector<MoveCommand> m_moves;
+    std::vector<ObjectTracker::Toggle> m_toggles;
+    // Objects switched on or off for the tick being simulated, with their real state.
+    std::vector<std::pair<GameObject*, bool>> m_switched;
     double m_triggerX = 0.0;
     uint64_t m_stamp = 0;
     // Speed portal reached this tick, applied next tick.
     float m_pendingSpeed = 0.f;
     cocos2d::CCRect m_tickStartRect;
     cocos2d::CCPoint m_killerPosition;
+    bool m_killerSwitchedOn = false;
     PhysicsModel m_model;
     bool m_hasRingReset = false;
     bool m_held = false;

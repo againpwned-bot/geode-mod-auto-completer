@@ -25,6 +25,16 @@ class ObjectTracker {
 public:
     static constexpr int kMoveTrigger = 901;
     static constexpr int kSpawnTrigger = 1268;
+    static constexpr int kToggleTrigger = 1049;
+
+    // A group switched on or off at the end of physics step `step`.
+    struct Toggle {
+        int group = 0;
+        int step = 0;
+        bool on = false;
+        void const* source = nullptr; // trigger that did it, if known
+        bool predicted = false;       // expected from a spawn trigger, not done yet
+    };
 
     static ObjectTracker& get();
 
@@ -55,13 +65,20 @@ public:
         cocos2d::CCPoint offset, int group, float duration, int easing, float rate, bool lockPlayerX,
         bool lockPlayerY, bool lockCameraX, bool lockCameraY, float modX, float modY
     );
+    // A group was switched on or off in the real game (GJBaseGameLayer::toggleGroup).
+    void onToggle(int group, bool on);
+    // Whether `object` is switched on during step `step` according to toggles after the world
+    // step (expected ones and `extra`, the simulation's own): 1 on, 0 off, -1 nothing known.
+    int enabledAt(GameObject* object, int step, std::vector<Toggle> const* extra) const;
+    std::vector<Toggle> const& expectedToggles() const { return m_expectedToggles; }
+    size_t toggleCount() const { return m_toggleLog.size(); }
     // A trigger is being activated in the real game; `playerX` is where player 1 is.
     // Returns the trigger that was being activated before, for endTrigger.
     EffectGameObject* beginTrigger(EffectGameObject* trigger, GJBaseGameLayer* layer, double playerX);
     void endTrigger(EffectGameObject* previous) { m_currentTrigger = previous; }
     std::vector<MoveCommand> const& commands() const { return m_commands; }
 
-    // Move and spawn triggers that fire when the player passes them, ordered by x.
+    // Move, toggle and spawn triggers that fire when the player passes them, ordered by x.
     struct PositionTrigger {
         double x = 0.0;
         EffectGameObject* trigger = nullptr;
@@ -69,8 +86,11 @@ public:
     // Finds them; runs once per level, after the level's objects exist.
     void scanLevel(GJBaseGameLayer* layer);
     bool levelScanned() const { return m_scanned; }
-    // Moves started when the player passes from `fromX` to `toX` during step `step`.
-    void movesBetween(GJBaseGameLayer* layer, double fromX, double toX, int step, std::vector<MoveCommand>& out);
+    // Moves and toggles started when the player passes from `fromX` to `toX` during step `step`.
+    void eventsBetween(
+        GJBaseGameLayer* layer, double fromX, double toX, int step, std::vector<MoveCommand>& moves,
+        std::vector<Toggle>& toggles
+    );
     // Player x where position triggers fire, relative to the trigger.
     double activationLead() const { return m_leadCount > 0 ? m_lead : 0.0; }
 
@@ -112,7 +132,9 @@ private:
     bool commandFor(EffectGameObject* trigger, int start, MoveCommand& out) const;
     // Compares a measured move of `object` between two steps with the move the commands say.
     void calibrate(GameObject* object, int from, int to, double dx, double dy);
-    std::vector<EffectGameObject*> const& spawnedMoves(GJBaseGameLayer* layer, EffectGameObject* spawn);
+    // Move and toggle triggers a spawn trigger starts.
+    std::vector<EffectGameObject*> const& spawnedTriggers(GJBaseGameLayer* layer, EffectGameObject* spawn);
+    static Toggle toggleFor(EffectGameObject* trigger, int step);
     void indexCommands();
 
     std::unordered_map<GameObject*, Track> m_tracks;
@@ -128,6 +150,11 @@ private:
     std::unordered_set<void const*> m_sources;
     EffectGameObject* m_currentTrigger = nullptr;
     int m_unknownSources = 0;
+
+    // Real toggles (latest first matters for the log) and ones expected from spawn delays.
+    std::vector<Toggle> m_toggleLog;
+    std::vector<Toggle> m_expectedToggles;
+    std::unordered_set<void const*> m_toggleSources;
 
     std::vector<PositionTrigger> m_triggers;
     std::unordered_map<EffectGameObject*, std::vector<EffectGameObject*>> m_spawned;
