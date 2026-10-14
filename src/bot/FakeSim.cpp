@@ -564,7 +564,7 @@ void FakeSim::noteToggle(int group, bool on) {
     toggle.group = group;
     toggle.step = this->absoluteStep();
     toggle.on = on;
-    m_toggles.push_back(toggle);
+    m_toggles.add(toggle);
 }
 
 void FakeSim::restoreObjects() {
@@ -629,8 +629,8 @@ void FakeSim::collideMovingObjects(float dt) {
         if (std::find(groups.begin(), groups.end(), toggle.group) != groups.end()) return;
         groups.push_back(toggle.group);
     };
-    for (auto const& toggle : tracker.expectedToggles()) addToggled(toggle);
-    for (auto const& toggle : m_toggles) addToggled(toggle);
+    for (auto const& toggle : tracker.expectedToggles().list) addToggled(toggle);
+    for (auto const& toggle : m_toggles.list) addToggled(toggle);
     for (int group : groups) {
         for (auto* object : tracker.groupObjects(m_layer, group)) consider(object, true);
     }

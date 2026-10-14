@@ -99,13 +99,15 @@ void ObjectTracker::setWorldStep(int step) {
             m_commands.end()
         );
         if (m_commands.size() != before) this->indexCommands();
-        m_expectedToggles.erase(
+        auto& expected = m_expectedToggles.list;
+        size_t const count = expected.size();
+        expected.erase(
             std::remove_if(
-                m_expectedToggles.begin(), m_expectedToggles.end(),
-                [this](Toggle const& t) { return t.step + 64 < m_worldStep; }
+                expected.begin(), expected.end(), [this](Toggle const& t) { return t.step + 64 < m_worldStep; }
             ),
-            m_expectedToggles.end()
+            expected.end()
         );
+        if (expected.size() != count) m_expectedToggles.rebuild();
     }
 }
 
@@ -142,6 +144,7 @@ ObjectTracker::Track& ObjectTracker::observe(GameObject* object) {
 
 void ObjectTracker::observeVisible(GJBaseGameLayer* layer) {
     if (!layer) return;
+    if (layer->m_player1) this->auditTriggers(layer->m_player1->getPositionX());
     int const columns = static_cast<int>(layer->m_sections.size());
     int left = layer->m_leftSectionIndex;
     int right = layer->m_rightSectionIndex;
@@ -263,19 +266,19 @@ void ObjectTracker::onToggle(int group, bool on) {
     if (toggle.source) {
         m_toggleSources.insert(toggle.source);
         // The real toggle replaces the one expected from its spawn trigger.
-        m_expectedToggles.erase(
-            std::remove_if(
-                m_expectedToggles.begin(), m_expectedToggles.end(),
-                [&](Toggle const& t) { return t.source == toggle.source; }
-            ),
-            m_expectedToggles.end()
+        auto& expected = m_expectedToggles.list;
+        size_t const count = expected.size();
+        expected.erase(
+            std::remove_if(expected.begin(), expected.end(), [&](Toggle const& t) { return t.source == toggle.source; }),
+            expected.end()
         );
+        if (expected.size() != count) m_expectedToggles.rebuild();
     }
     m_toggleLog.push_back(toggle);
     if (m_toggleLog.size() > 256) m_toggleLog.erase(m_toggleLog.begin(), m_toggleLog.begin() + 128);
 }
 
-int ObjectTracker::enabledAt(GameObject* object, int step, std::vector<Toggle> const* extra) const {
+int ObjectTracker::enabledAt(GameObject* object, int step, ToggleSet const* extra) const {
     bool const hasExtra = extra && !extra->empty();
     if (m_expectedToggles.empty() && !hasExtra) return -1;
     // The latest toggle of any of its groups before this step decides.
@@ -289,9 +292,11 @@ int ObjectTracker::enabledAt(GameObject* object, int step, std::vector<Toggle> c
         }
     };
     forEachGroup(object, [&](int group) {
-        for (auto const& toggle : m_expectedToggles) consider(toggle, group);
-        if (hasExtra) {
-            for (auto const& toggle : *extra) {
+        if (m_expectedToggles.touches(group)) {
+            for (auto const& toggle : m_expectedToggles.list) consider(toggle, group);
+        }
+        if (hasExtra && extra->touches(group)) {
+            for (auto const& toggle : extra->list) {
                 // The real game did it meanwhile; that one counts.
                 if (toggle.source && m_toggleSources.count(toggle.source)) continue;
                 consider(toggle, group);
@@ -313,6 +318,7 @@ ObjectTracker::Toggle ObjectTracker::toggleFor(EffectGameObject* trigger, int st
 EffectGameObject* ObjectTracker::beginTrigger(EffectGameObject* trigger, GJBaseGameLayer* layer, double playerX) {
     EffectGameObject* const previous = m_currentTrigger;
     m_currentTrigger = trigger;
+    m_fired.insert(trigger);
     int const id = trigger->m_objectID;
     if (id != kMoveTrigger && id != kSpawnTrigger && id != kToggleTrigger) return previous;
     if (trigger->m_isTouchTriggered || trigger->m_isSpawnTriggered) return previous;
@@ -338,10 +344,12 @@ EffectGameObject* ObjectTracker::beginTrigger(EffectGameObject* trigger, GJBaseG
         ));
         bool added = false;
         for (auto* spawned : this->spawnedTriggers(layer, trigger)) {
+            int const state = this->enabledAt(spawned, m_worldStep + delay, nullptr);
+            if (state < 0 ? spawned->m_isGroupDisabled : state == 0) continue;
             if (spawned->m_objectID == kToggleTrigger) {
                 Toggle toggle = toggleFor(spawned, m_worldStep + delay);
                 toggle.predicted = true;
-                m_expectedToggles.push_back(toggle);
+                m_expectedToggles.add(toggle);
                 continue;
             }
             MoveCommand command;
@@ -511,34 +519,72 @@ void ObjectTracker::scanLevel(GJBaseGameLayer* layer) {
 
 void ObjectTracker::eventsBetween(
     GJBaseGameLayer* layer, double fromX, double toX, int step, std::vector<MoveCommand>& moves,
-    std::vector<Toggle>& toggles
+    ToggleSet& toggles
 ) {
     if (m_triggers.empty() || toX <= fromX) return;
     double const lead = this->activationLead();
+    // GD doesn't fire triggers whose group is switched off, counting the toggles expected
+    // (and simulated) before then.
+    auto active = [&](GameObject* trigger, int at) {
+        int const state = this->enabledAt(trigger, at, &toggles);
+        return state < 0 ? !trigger->m_isGroupDisabled : state == 1;
+    };
     auto it = std::upper_bound(m_triggers.begin(), m_triggers.end(), fromX - lead, [](double x, PositionTrigger const& t) {
         return x < t.x;
     });
     for (; it != m_triggers.end() && it->x + lead <= toX; ++it) {
         auto* trigger = it->trigger;
+        if (!active(trigger, step)) continue;
         if (trigger->m_objectID == kMoveTrigger) {
             MoveCommand command;
             if (this->commandFor(trigger, step, command)) moves.push_back(command);
             continue;
         }
         if (trigger->m_objectID == kToggleTrigger) {
-            toggles.push_back(toggleFor(trigger, step));
+            toggles.add(toggleFor(trigger, step));
             continue;
         }
         int const delay = static_cast<int>(std::lround(
             static_cast<SpawnTriggerGameObject*>(trigger)->m_spawnDelay * kStepsPerSecond
         ));
         for (auto* spawned : this->spawnedTriggers(layer, trigger)) {
+            if (!active(spawned, step + delay)) continue;
             if (spawned->m_objectID == kToggleTrigger) {
-                toggles.push_back(toggleFor(spawned, step + delay));
+                toggles.add(toggleFor(spawned, step + delay));
                 continue;
             }
             MoveCommand command;
             if (this->commandFor(spawned, step + delay, command)) moves.push_back(command);
+        }
+    }
+}
+
+void ObjectTracker::auditTriggers(double playerX) {
+    if (m_triggers.empty()) return;
+    double const lead = this->activationLead();
+    if (m_auditIndex < 0) {
+        // Start with the first trigger still ahead of the player.
+        auto const it = std::upper_bound(
+            m_triggers.begin(), m_triggers.end(), playerX - lead, [](double x, PositionTrigger const& t) { return x < t.x; }
+        );
+        m_auditIndex = static_cast<int>(it - m_triggers.begin());
+        return;
+    }
+    // Triggers the player is well past by now should have fired.
+    while (m_auditIndex < static_cast<int>(m_triggers.size()) &&
+           m_triggers[m_auditIndex].x + lead < playerX - 30.0) {
+        auto* trigger = m_triggers[m_auditIndex].trigger;
+        m_auditIndex += 1;
+        if (m_fired.count(trigger)) continue;
+        m_unfired += 1;
+        if (trigger->m_isGroupDisabled) m_unfiredOff += 1;
+        if (m_unfiredLogged < 5) {
+            m_unfiredLogged += 1;
+            log::info(
+                "Trigger {} at x {:.1f} (group {}) didn't fire when the player passed it{}", trigger->m_objectID,
+                trigger->m_positionX, trigger->m_targetGroupID,
+                trigger->m_isGroupDisabled ? "; it is switched off" : "; it is not switched off"
+            );
         }
     }
 }
@@ -703,6 +749,8 @@ void ObjectTracker::resetAttempt() {
     m_toggleLog.clear();
     m_expectedToggles.clear();
     m_toggleSources.clear();
+    m_fired.clear();
+    m_auditIndex = -1;
     m_currentTrigger = nullptr;
     m_worldStep = -1;
     m_lastPrune = 0;
@@ -716,6 +764,9 @@ void ObjectTracker::resetLevel() {
     m_orbs.clear();
     m_scanned = false;
     m_loggedSections = false;
+    m_unfired = 0;
+    m_unfiredOff = 0;
+    m_unfiredLogged = 0;
 }
 
 } // namespace ac

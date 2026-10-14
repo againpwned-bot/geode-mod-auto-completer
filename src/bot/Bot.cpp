@@ -806,10 +806,11 @@ void Bot::runShadow(PlayLayer* layer) {
     if (m_stats.shadowTicks % 1200 == 0) {
         log::info(
             "Tick checks: {} ticks, {} differ; press/release ticks: {}, {} differ; moving objects: {} of {}, "
-            "trigger moves: {}, group toggles: {}",
+            "trigger moves: {}, group toggles: {}, passed triggers that didn't fire: {} ({} switched off)",
             m_stats.shadowTicks, m_stats.shadowMismatches, m_shadowInputTicks, m_shadowInputMismatches,
             ObjectTracker::get().movingCount(), ObjectTracker::get().size(), ObjectTracker::get().commands().size(),
-            ObjectTracker::get().toggleCount()
+            ObjectTracker::get().toggleCount(), ObjectTracker::get().unfiredTriggers(),
+            ObjectTracker::get().unfiredSwitchedOff()
         );
     }
 }

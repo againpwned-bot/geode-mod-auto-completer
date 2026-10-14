@@ -36,6 +36,38 @@ public:
         bool predicted = false;       // expected from a spawn trigger, not done yet
     };
 
+    // Toggles, plus which groups they touch so most objects are ruled out at a glance.
+    class ToggleSet {
+    public:
+        std::vector<Toggle> list;
+
+        void add(Toggle const& toggle) {
+            list.push_back(toggle);
+            this->mark(toggle.group);
+        }
+        // After removing from `list`.
+        void rebuild() {
+            std::fill(m_groups.begin(), m_groups.end(), 0);
+            for (auto const& toggle : list) this->mark(toggle.group);
+        }
+        bool touches(int group) const {
+            return group >= 0 && group < static_cast<int>(m_groups.size()) && m_groups[group];
+        }
+        bool empty() const { return list.empty(); }
+        void clear() {
+            list.clear();
+            std::fill(m_groups.begin(), m_groups.end(), 0);
+        }
+
+    private:
+        void mark(int group) {
+            if (group < 0 || group > 20000) return;
+            if (group >= static_cast<int>(m_groups.size())) m_groups.resize(group + 1, 0);
+            m_groups[group] = 1;
+        }
+        std::vector<uint8_t> m_groups;
+    };
+
     static ObjectTracker& get();
 
     struct Track {
@@ -69,8 +101,8 @@ public:
     void onToggle(int group, bool on);
     // Whether `object` is switched on during step `step` according to toggles after the world
     // step (expected ones and `extra`, the simulation's own): 1 on, 0 off, -1 nothing known.
-    int enabledAt(GameObject* object, int step, std::vector<Toggle> const* extra) const;
-    std::vector<Toggle> const& expectedToggles() const { return m_expectedToggles; }
+    int enabledAt(GameObject* object, int step, ToggleSet const* extra) const;
+    ToggleSet const& expectedToggles() const { return m_expectedToggles; }
     size_t toggleCount() const { return m_toggleLog.size(); }
     // A trigger is being activated in the real game; `playerX` is where player 1 is.
     // Returns the trigger that was being activated before, for endTrigger.
@@ -89,10 +121,16 @@ public:
     // Moves and toggles started when the player passes from `fromX` to `toX` during step `step`.
     void eventsBetween(
         GJBaseGameLayer* layer, double fromX, double toX, int step, std::vector<MoveCommand>& moves,
-        std::vector<Toggle>& toggles
+        ToggleSet& toggles
     );
     // Player x where position triggers fire, relative to the trigger.
     double activationLead() const { return m_leadCount > 0 ? m_lead : 0.0; }
+    // Checks that the position triggers the real player passed really fired (the log says
+    // which didn't).
+    void auditTriggers(double playerX);
+    // Position triggers passed that the game didn't fire, and how many were switched off.
+    int unfiredTriggers() const { return m_unfired; }
+    int unfiredSwitchedOff() const { return m_unfiredOff; }
 
     struct Moved {
         GameObject* object = nullptr;
@@ -162,10 +200,15 @@ private:
 
     // Real toggles (latest first matters for the log) and ones expected from spawn delays.
     std::vector<Toggle> m_toggleLog;
-    std::vector<Toggle> m_expectedToggles;
+    ToggleSet m_expectedToggles;
     std::unordered_set<void const*> m_toggleSources;
 
     std::vector<PositionTrigger> m_triggers;
+    std::unordered_set<EffectGameObject*> m_fired;
+    int m_auditIndex = -1;
+    int m_unfired = 0;
+    int m_unfiredOff = 0;
+    int m_unfiredLogged = 0;
     std::unordered_map<EffectGameObject*, std::vector<EffectGameObject*>> m_spawned;
     std::unordered_map<int, std::vector<GameObject*>> m_groupObjects;
     std::vector<GameObject*> m_orbs;

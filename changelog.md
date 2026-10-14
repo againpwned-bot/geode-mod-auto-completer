@@ -1,3 +1,8 @@
+# v1.3.8
+- Fix: the simulation fired move, toggle and spawn triggers even when the trigger itself sat in a group that was switched off, which GD never does. On levels that steer their traps with toggles (like "I Spy") the bot then believed in moves or toggles that never happen: it planned as if a hazard would get out of the way, skipped the orb, and saw the real danger only when it was too late. Switched-off triggers are now skipped, counting the toggles expected before the trigger is reached.
+- Faster toggle checks on levels with thousands of toggle triggers.
+- Logs: triggers the real player passed that the game didn't fire are listed (and counted in the 5 second summary), so a wrong guess about triggers shows up right away.
+
 # v1.3.7
 - Fix: the bot didn't see orbs and pads that move along with the player (like the pink orb on "I Spy"). The hidden player only checks objects filed near its own spot in the level, and while it looks a second or two ahead, an orb travelling with the player is still filed back where the player is now. Moving hazards were already handled this way; orbs and pads now are too, including ones a toggle trigger is about to switch on.
 - Logs: when the bot gets stuck, it lists the orbs and pads the planned path passes near (type, where they are expected to be at that moment, whether they are moving or switched off).

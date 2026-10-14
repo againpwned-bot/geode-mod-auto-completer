@@ -210,7 +210,7 @@ private:
         std::vector<Flags> flags;
         std::vector<GameObject*> portals;
         std::vector<MoveCommand> moves;
-        std::vector<ObjectTracker::Toggle> toggles;
+        ObjectTracker::ToggleSet toggles;
         float pendingSpeed = 0.f;
         Mode mode = Mode::Cube;
         bool used = false;
@@ -241,7 +241,7 @@ private:
     std::vector<ObjectTracker::Moved> m_moved;
     // Moves started by triggers the hidden player passed, and how far it has checked.
     std::vector<MoveCommand> m_moves;
-    std::vector<ObjectTracker::Toggle> m_toggles;
+    ObjectTracker::ToggleSet m_toggles;
     // Objects switched on or off for the tick being simulated, with their real state.
     std::vector<std::pair<GameObject*, bool>> m_switched;
     double m_triggerX = 0.0;
