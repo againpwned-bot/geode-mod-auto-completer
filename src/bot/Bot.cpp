@@ -157,6 +157,7 @@ void Bot::onLevelInit(PlayLayer* layer) {
     m_shadowLogged = 0;
     m_surprisesLogged = 0;
     m_orbLogs = 0;
+    m_goalLogs = 0;
     m_shadowInputLogged = 0;
     m_shadowInputTicks = 0;
     m_shadowInputMismatches = 0;
@@ -567,6 +568,15 @@ void Bot::finishCheck() {
     }
     else {
         this->setStatus("Playing");
+        // Ended at a portal before the planned horizon: say which, the plan stops there.
+        if (auto* portal = check.sim->goalObject(); portal && end < kHorizon && m_goalLogs < 8) {
+            m_goalLogs += 1;
+            log::info(
+                "Look-ahead from tick {} stops at tick {} at a portal: obj {} type {} at ({:.1f},{:.1f}); {}", check.t0,
+                check.t0 + end, portal->m_objectID, static_cast<int>(portal->m_objectType), portal->m_positionX,
+                portal->m_positionY, ObjectTracker::get().describe(portal)
+            );
+        }
     }
 
     m_check.reset();

@@ -1,3 +1,7 @@
+# v1.3.9
+- Fix: switched-off portals (toggled off, disabled or "no touch") still counted in the simulation. A gravity, dual or teleport portal ends the look-ahead, so on "I Spy" a fake portal made the bot stop looking ahead before the hazard, believe the path was fine and never plan the orb click. GD ignores such portals and now so does the bot.
+- Logs: when the look-ahead ends at a portal, the log says which portal and where.
+
 # v1.3.8
 - Fix: the simulation fired move, toggle and spawn triggers even when the trigger itself sat in a group that was switched off, which GD never does. On levels that steer their traps with toggles (like "I Spy") the bot then believed in moves or toggles that never happen: it planned as if a hazard would get out of the way, skipped the orb, and saw the real danger only when it was too late. Switched-off triggers are now skipped, counting the toggles expected before the trigger is reached.
 - Faster toggle checks on levels with thousands of toggle triggers.

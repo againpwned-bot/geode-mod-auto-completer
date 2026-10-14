@@ -339,6 +339,9 @@ void FakeSim::notePortal(GameObject* object) {
     float speed = 0.f;
     PortalKind const kind = portalKind(object, speed);
     if (kind == PortalKind::None) return;
+    // Switched off (by a toggle, possibly one the simulation expects) or untouchable
+    // portals do nothing in GD.
+    if (object->m_isGroupDisabled || object->m_isDisabled || object->m_isNoTouch) return;
     if (std::find(m_portalsUsed.begin(), m_portalsUsed.end(), object) != m_portalsUsed.end()) return;
     if (!m_fake->getObjectRect().intersectsRect(object->getObjectRect())) return;
     m_portalsUsed.push_back(object);
@@ -372,6 +375,7 @@ void FakeSim::notePortal(GameObject* object) {
             else flip = !m_fake->m_isUpsideDown;
             if (flip != m_fake->m_isUpsideDown) {
                 m_reachedGoal = true;
+                m_goalObject = object;
             }
             break;
         }
@@ -387,6 +391,7 @@ void FakeSim::notePortal(GameObject* object) {
         case PortalKind::Goal:
             if (changesMode(object->m_objectType, m_fake)) {
                 m_reachedGoal = true;
+                m_goalObject = object;
             }
             break;
         case PortalKind::None:
@@ -495,6 +500,7 @@ void FakeSim::load(int handle) {
     m_pendingSpeed = slot.pendingSpeed;
     m_triggerX = m_fake->getPositionX();
     m_reachedGoal = false;
+    m_goalObject = nullptr;
     for (size_t i = 0; i < m_log.size(); ++i) {
         write(m_log[i].object, i < slot.flags.size() ? slot.flags[i] : m_log[i].base);
     }

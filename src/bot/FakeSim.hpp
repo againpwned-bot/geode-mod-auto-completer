@@ -183,6 +183,8 @@ public:
     static bool& reattributeOnLoad();
     void setClock(double time) { if (m_fake) m_fake->m_totalTime = time; }
     DeathInfo const& lastDeath() const { return m_lastDeath; }
+    // The portal that last ended a look-ahead, if any.
+    GameObject* goalObject() const { return m_goalObject; }
     // Real physics step the tick being simulated corresponds to.
     int absoluteStep() const { return m_baseStep + m_tick; }
     // Moves `object` to where it will be during the tick being simulated if it is moving;
@@ -261,6 +263,7 @@ private:
 
     std::vector<GameObject*> m_portalsUsed;
     bool m_reachedGoal = false;
+    GameObject* m_goalObject = nullptr;
     std::vector<LogEntry> m_log;
     std::unordered_set<EnhancedGameObject*> m_logged;
     std::vector<Slot> m_slots;

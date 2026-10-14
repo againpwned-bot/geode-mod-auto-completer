@@ -145,6 +145,7 @@ private:
     bool m_movementKnown = false;
     int m_surprisesLogged = 0;
     int m_orbLogs = 0;
+    int m_goalLogs = 0;
     bool m_desyncFlagged = false;
 
     Calibration m_calibration;
