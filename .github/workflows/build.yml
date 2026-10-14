@@ -1,0 +1,59 @@
+name: Build Geode Mod
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+jobs:
+  planner-tests:
+    name: Planner tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run planner tests
+        run: |
+          g++ -std=c++20 -O2 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            -I src tests/planner_test.cpp src/planner/Planner.cpp -o planner_test
+          ./planner_test
+          g++ -std=c++20 -O2 -g -Wall -Wextra -Werror -fsanitize=address,undefined \
+            -I src tests/gd_pilot_test.cpp src/planner/Planner.cpp -o gd_pilot_test
+          ./gd_pilot_test
+
+  build:
+    name: Windows
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the mod
+        id: build
+        uses: geode-sdk/build-geode-mod@main
+        with:
+          target: Win64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Auto Completer (Windows)
+          path: ${{ steps.build.outputs.build-output }}
+
+      # Manual runs also commit the built files to dist/ on the same branch, so the
+      # .geode and the raw .dll can be grabbed straight from the repo.
+      - name: Publish build to dist/
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          mkdir -p dist
+          find ./build -maxdepth 1 -name '*.geode' -exec cp {} dist/ \;
+          python -c "import glob, zipfile; [zipfile.ZipFile(f).extract(n, 'dist') for f in glob.glob('dist/*.geode') for n in zipfile.ZipFile(f).namelist() if n.endswith('.dll')]"
+          ls -la dist
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f dist
+          git commit -m "Publish Windows build to dist/ [skip ci]"
+          git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"

@@ -1,0 +1,596 @@
+#include "FakeSim.hpp"
+
+#include <algorithm>
+#include <chrono>
+
+using namespace geode::prelude;
+
+namespace ac {
+
+PhysicsModel PhysicsModel::variant(int index, PhysicsModel const& base) {
+    PhysicsModel model = base;
+    model.inputDelay = index % 2;
+    model.jumpVars = static_cast<Place>((index / 2) % 3);
+    model.stateVars = static_cast<Place>((index / 6) % 3);
+    return model;
+}
+
+int PhysicsModel::variantIndex() const {
+    return inputDelay % 2 + static_cast<int>(jumpVars) * 2 + static_cast<int>(stateVars) * 6;
+}
+
+std::string PhysicsModel::describe() const {
+    auto place = [](Place p) {
+        switch (p) {
+            case Place::Inside: return "in";
+            case Place::Start: return "start";
+            case Place::End: return "end";
+        }
+        return "?";
+    };
+    return fmt::format(
+        "delay {} | jump {} | state {} | pre {} | log {}",
+        inputDelay, place(jumpVars), place(stateVars), preCollision ? "on" : "in", collisionLog ? "on" : "in"
+    );
+}
+
+TickRecorder& TickRecorder::get() {
+    static TickRecorder recorder;
+    return recorder;
+}
+
+void TickRecorder::beginFrame(PlayerObject* player, unsigned) {
+    m_player = player;
+    m_active = player != nullptr;
+    m_step = 0;
+    m_depth = 0;
+    m_segment.clear();
+}
+
+void TickRecorder::stepStarted(unsigned progress) {
+    if (!m_active) return;
+    if (m_step > 0 && progress == m_stepProgress) return;
+    m_stepProgress = progress;
+    m_step += 1;
+
+    // The player's clock is advanced once per step; measure by how much.
+    double const now = m_player->m_totalTime;
+    if (m_lastTime >= 0.0 && now > m_lastTime && now - m_lastTime < 0.05) {
+        m_timeStep = now - m_lastTime;
+    }
+    m_lastTime = now;
+}
+
+void TickRecorder::endFrame(unsigned) {
+    if (m_active && m_step >= 1) {
+        bool const moved = std::any_of(m_segment.begin(), m_segment.end(), [](TickOp const& op) {
+            return op.kind == TickOp::Kind::Update;
+        });
+        // A frame with 2+ steps gives a clean first step. With a single step the segment
+        // runs to the end of the frame, so it's only used until a clean one is seen.
+        bool const strong = m_step >= 2;
+        if (moved && (strong || !m_strong)) {
+            // Only a different sequence of calls counts as a new template; the step size
+            // is just refreshed.
+            bool const same = m_template.size() == m_segment.size() &&
+                std::equal(m_template.begin(), m_template.end(), m_segment.begin(), [](TickOp const& a, TickOp const& b) {
+                    return a.kind == b.kind && a.flag == b.flag;
+                });
+            m_template = m_segment;
+            if (!same) {
+                m_revision += 1;
+                log::info("Tick calls: {}", this->describe());
+            }
+            m_strong = m_strong || strong;
+        }
+    }
+    m_active = false;
+    m_player = nullptr;
+}
+
+void TickRecorder::enter(PlayerObject* player, TickOp::Kind kind, float dt, bool flag) {
+    if (!m_active) return;
+    if (m_depth == 0 && player == m_player && m_step == 1) {
+        TickOp op;
+        op.kind = kind;
+        op.dt = dt;
+        op.flag = flag;
+        m_segment.push_back(op);
+    }
+    m_depth += 1;
+}
+
+void TickRecorder::leave() {
+    if (m_active && m_depth > 0) {
+        m_depth -= 1;
+    }
+}
+
+std::string TickRecorder::describe() const {
+    std::string out;
+    for (auto const& op : m_template) {
+        if (!out.empty()) out += ' ';
+        switch (op.kind) {
+            case TickOp::Kind::ResetRings: out += "rings"; break;
+            case TickOp::Kind::Internal: out += "internal"; break;
+            case TickOp::Kind::Update: out += "update"; break;
+            case TickOp::Kind::Collide: out += "collide"; break;
+            case TickOp::Kind::Post: out += op.flag ? "post*" : "post"; break;
+            case TickOp::Kind::Rotate: out += "rotate"; break;
+        }
+    }
+    return out.empty() ? "none" : out;
+}
+
+void TickRecorder::reset() {
+    m_player = nullptr;
+    m_active = false;
+    m_step = 0;
+    m_depth = 0;
+    m_strong = false;
+    m_lastTime = -1.0;
+    m_timeStep = 0.0;
+    m_segment.clear();
+    m_template.clear();
+    m_revision += 1;
+}
+
+FakeContext& fakeContext() {
+    static FakeContext context;
+    return context;
+}
+
+FakeWorld& FakeWorld::get() {
+    static FakeWorld world;
+    return world;
+}
+
+bool FakeWorld::attach(PlayLayer* layer) {
+    this->detach(m_layer);
+    if (!layer || !layer->m_objectLayer) return false;
+
+    auto* container = CCLayer::create();
+    if (!container) return false;
+    container->setVisible(false);
+    container->setID("simulation"_spr);
+    layer->m_objectLayer->addChild(container, -1000);
+
+    auto* player = PlayerObject::create(1, 1, layer, container, true);
+    if (!player) {
+        container->removeFromParent();
+        return false;
+    }
+    player->setVisible(false);
+    player->m_playEffects = false;
+    container->addChild(player);
+
+    m_layer = layer;
+    m_container = container;
+    m_player = player;
+    return true;
+}
+
+void FakeWorld::detach(PlayLayer* layer) {
+    if (!m_container || layer != m_layer) return;
+    m_container->removeFromParent();
+    m_container = nullptr;
+    m_player = nullptr;
+    m_layer = nullptr;
+}
+
+FakeSim::FakeSim(
+    PlayLayer* layer, PlayerObject* fake, std::vector<TickOp> ops, double timeStep, PhysicsModel model,
+    bool hold, PlayerFix const* from
+)
+    : m_layer(layer), m_fake(fake), m_ops(std::move(ops)), m_timeStep(timeStep), m_model(model), m_held(hold), m_previousWant(hold) {
+    m_hasRingReset = std::any_of(m_ops.begin(), m_ops.end(), [](TickOp const& op) {
+        return op.kind == TickOp::Kind::ResetRings;
+    });
+    auto* real = layer ? layer->m_player1 : nullptr;
+    if (!real || !m_fake) return;
+
+    m_fake->copyAttributes(real);
+    if (from) {
+        from->apply(m_fake);
+    }
+    else {
+        PlayerFix fix;
+        fix.capture(real);
+        fix.apply(m_fake);
+    }
+    m_fake->m_isDead = false;
+    m_fake->m_ignoreDamage = false;
+    m_fake->m_playEffects = false;
+    m_fake->setVisible(false);
+}
+
+FakeSim::~FakeSim() {
+    if (m_inSlice) {
+        this->restoreBaseline();
+    }
+}
+
+FakeSim::Flags FakeSim::read(EnhancedGameObject* object) {
+    Flags flags;
+    flags.activated = object->m_activated;
+    flags.byPlayer1 = object->m_activatedByPlayer1;
+    flags.byPlayer2 = object->m_activatedByPlayer2;
+    return flags;
+}
+
+void FakeSim::write(EnhancedGameObject* object, Flags const& flags) {
+    object->m_activated = flags.activated;
+    object->m_activatedByPlayer1 = flags.byPlayer1;
+    object->m_activatedByPlayer2 = flags.byPlayer2;
+}
+
+void FakeSim::restoreBaseline() {
+    for (auto const& entry : m_log) {
+        write(entry.object, entry.base);
+    }
+}
+
+void FakeSim::noteObject(GameObject* object) {
+    auto* enhanced = typeinfo_cast<EnhancedGameObject*>(object);
+    if (!enhanced || !m_logged.insert(enhanced).second) return;
+    LogEntry entry;
+    entry.object = enhanced;
+    entry.base = read(enhanced);
+    m_log.push_back(entry);
+}
+
+namespace {
+    enum class PortalKind { None, Speed, Size, Gravity, Goal };
+
+    PortalKind portalKind(GameObject* object, float& speed) {
+        switch (object->m_objectType) {
+            case GameObjectType::NormalGravityPortal:
+            case GameObjectType::InverseGravityPortal:
+            case GameObjectType::GravityTogglePortal:
+                return PortalKind::Gravity;
+            case GameObjectType::RegularSizePortal:
+            case GameObjectType::MiniSizePortal:
+                return PortalKind::Size;
+            case GameObjectType::ShipPortal:
+            case GameObjectType::CubePortal:
+            case GameObjectType::BallPortal:
+            case GameObjectType::UfoPortal:
+            case GameObjectType::WavePortal:
+            case GameObjectType::RobotPortal:
+            case GameObjectType::SpiderPortal:
+            case GameObjectType::SwingPortal:
+            case GameObjectType::DualPortal:
+            case GameObjectType::SoloPortal:
+            case GameObjectType::TeleportPortal:
+                return PortalKind::Goal;
+            case GameObjectType::Modifier:
+                switch (object->m_objectID) {
+                    case 200: speed = 0.7f; return PortalKind::Speed;
+                    case 201: speed = 0.9f; return PortalKind::Speed;
+                    case 202: speed = 1.1f; return PortalKind::Speed;
+                    case 203: speed = 1.3f; return PortalKind::Speed;
+                    case 1334: speed = 1.6f; return PortalKind::Speed;
+                    default: return PortalKind::None;
+                }
+            default:
+                return PortalKind::None;
+        }
+    }
+
+    // Whether a mode portal would change anything for this player.
+    bool changesMode(GameObjectType type, PlayerObject* player) {
+        Mode const mode = modeOf(player);
+        switch (type) {
+            case GameObjectType::ShipPortal: return mode != Mode::Ship;
+            case GameObjectType::CubePortal: return mode != Mode::Cube;
+            case GameObjectType::BallPortal: return mode != Mode::Ball;
+            case GameObjectType::UfoPortal: return mode != Mode::Ufo;
+            case GameObjectType::WavePortal: return mode != Mode::Wave;
+            case GameObjectType::RobotPortal: return mode != Mode::Robot;
+            case GameObjectType::SpiderPortal: return mode != Mode::Spider;
+            case GameObjectType::SwingPortal: return mode != Mode::Swing;
+            default: return true;
+        }
+    }
+}
+
+void FakeSim::notePortal(GameObject* object) {
+    if (!object || !m_fake) return;
+    float speed = 0.f;
+    PortalKind const kind = portalKind(object, speed);
+    if (kind == PortalKind::None) return;
+    if (std::find(m_portalsUsed.begin(), m_portalsUsed.end(), object) != m_portalsUsed.end()) return;
+    if (!m_fake->getObjectRect().intersectsRect(object->getObjectRect())) return;
+    m_portalsUsed.push_back(object);
+
+    switch (kind) {
+        case PortalKind::Speed:
+            m_fake->m_playerSpeed = speed;
+            break;
+        case PortalKind::Size: {
+            bool const mini = object->m_objectType == GameObjectType::MiniSizePortal;
+            if (mini != (m_fake->m_vehicleSize != 1.f)) {
+                m_fake->togglePlayerScale(mini, true);
+                m_fake->updatePlayerScale();
+            }
+            break;
+        }
+        case PortalKind::Gravity: {
+            // Flipping goes through camera and level state, so a portal that would flip
+            // the player ends the look-ahead like a mode portal.
+            bool flip = m_fake->m_isUpsideDown;
+            if (object->m_objectType == GameObjectType::NormalGravityPortal) flip = false;
+            else if (object->m_objectType == GameObjectType::InverseGravityPortal) flip = true;
+            else flip = !m_fake->m_isUpsideDown;
+            if (flip != m_fake->m_isUpsideDown) {
+                m_reachedGoal = true;
+            }
+            break;
+        }
+        case PortalKind::Goal:
+            if (changesMode(object->m_objectType, m_fake)) {
+                m_reachedGoal = true;
+            }
+            break;
+        case PortalKind::None:
+            break;
+    }
+}
+
+void FakeSim::beginSlice() {
+    if (m_inSlice) return;
+    m_inSlice = true;
+    // The real game may have used some of these objects meanwhile.
+    for (auto& entry : m_log) {
+        entry.base = read(entry.object);
+    }
+    if (m_cursor >= 0) {
+        this->load(m_cursor);
+        this->release(m_cursor);
+        m_cursor = -1;
+    }
+}
+
+void FakeSim::endSlice() {
+    if (!m_inSlice) return;
+    m_cursor = this->save();
+    this->restoreBaseline();
+    m_inSlice = false;
+}
+
+int FakeSim::save() {
+    if (!m_fake) return -1;
+
+    Slot slot;
+    slot.fix.capture(m_fake);
+    slot.held = m_held;
+    slot.previousWant = m_previousWant;
+    slot.tick = m_tick;
+    slot.portals = m_portalsUsed;
+    slot.flags.reserve(m_log.size());
+    for (auto const& entry : m_log) {
+        slot.flags.push_back(read(entry.object));
+    }
+    slot.used = true;
+
+    if (!m_free.empty()) {
+        int const handle = m_free.back();
+        m_free.pop_back();
+        m_slots[handle] = std::move(slot);
+        return handle;
+    }
+    m_slots.push_back(std::move(slot));
+    return static_cast<int>(m_slots.size()) - 1;
+}
+
+bool& FakeSim::reattributeOnLoad() {
+    static bool value = false;
+    return value;
+}
+
+void FakeSim::load(int handle) {
+    if (handle < 0 || handle >= static_cast<int>(m_slots.size()) || !m_fake) return;
+    auto const& slot = m_slots[handle];
+    if (!slot.used) return;
+
+    if (reattributeOnLoad() && m_layer && m_layer->m_player1) {
+        m_fake->copyAttributes(m_layer->m_player1);
+    }
+    slot.fix.apply(m_fake);
+    m_fake->m_isDead = false;
+    m_held = slot.held;
+    m_previousWant = slot.previousWant;
+    m_tick = slot.tick;
+    m_portalsUsed = slot.portals;
+    m_reachedGoal = false;
+    for (size_t i = 0; i < m_log.size(); ++i) {
+        write(m_log[i].object, i < slot.flags.size() ? slot.flags[i] : m_log[i].base);
+    }
+}
+
+void FakeSim::release(int handle) {
+    if (handle < 0 || handle >= static_cast<int>(m_slots.size())) return;
+    if (!m_slots[handle].used) return;
+    m_slots[handle] = Slot{};
+    m_free.push_back(handle);
+}
+
+void FakeSim::runOp(TickOp const& op) {
+    switch (op.kind) {
+        case TickOp::Kind::ResetRings:
+            m_fake->resetTouchedRings(op.flag);
+            break;
+        case TickOp::Kind::Internal:
+            m_fake->updateInternalActions(op.dt);
+            break;
+        case TickOp::Kind::Update:
+            m_fake->update(op.dt);
+            break;
+        case TickOp::Kind::Collide:
+            m_layer->checkCollisions(m_fake, op.dt, false);
+            break;
+        case TickOp::Kind::Post:
+            m_fake->postCollision(op.dt, op.flag);
+            break;
+        case TickOp::Kind::Rotate:
+            m_fake->updateRotation(op.dt);
+            break;
+    }
+}
+
+void FakeSim::stepPhysics() {
+    using Place = PhysicsModel::Place;
+    auto& ctx = fakeContext();
+    auto* player = m_fake;
+
+    // GD sets every player's clock at the start of each step.
+    if (m_timeStep > 0.0) {
+        player->m_totalTime += m_timeStep;
+    }
+    if (m_model.jumpVars == Place::Start) player->updateJumpVariables();
+    if (m_model.stateVars == Place::Start) player->updateStateVariables();
+    // GD clears the collision log right after resetting touched rings.
+    if (m_model.collisionLog && !m_hasRingReset) player->resetCollisionLog(false);
+
+    for (auto const& op : m_ops) {
+        if (op.kind == TickOp::Kind::Collide && m_model.preCollision) {
+            player->preCollision();
+        }
+        this->runOp(op);
+        if (op.kind == TickOp::Kind::ResetRings && m_model.collisionLog) {
+            player->resetCollisionLog(false);
+        }
+        if (ctx.died) return;
+    }
+
+    if (m_model.jumpVars == Place::End) player->updateJumpVariables();
+    if (m_model.stateVars == Place::End) player->updateStateVariables();
+    // GD stores the position after every step (the field is misnamed in the bindings).
+    player->m_shipRotation = player->getPosition();
+}
+
+InlineProbe FakeSim::probeInlines() {
+    InlineProbe result;
+    if (!m_fake || !m_layer || m_ops.empty()) return result;
+
+    auto& ctx = fakeContext();
+    FakeContext const saved = ctx;
+    ctx.active = true;
+    ctx.player = m_fake;
+    ctx.sim = this;
+    ctx.died = false;
+
+    int const base = this->save();
+    for (auto const& op : m_ops) {
+        this->load(base);
+        auto* player = m_fake;
+
+        // Values each inlined function would visibly reset.
+        player->m_wasTeleported = true;               // preCollision
+        player->m_ringJumpRelated = true;
+        player->m_touchedGravityPortal = true;        // updateJumpVariables
+        player->m_maybeTouchedBreakableBlock = true;
+        player->m_stateBoostX = 1000;                 // updateStateVariables
+        player->m_stateScale = 1000;
+        player->m_maybeStateForce2 = 1000;
+        player->m_lastCollisionBottom = 13579;        // resetCollisionLog(false)
+        player->m_unk50C = 24680;
+
+        this->runOp(op);
+
+        if (!player->m_wasTeleported && !player->m_ringJumpRelated) result.preCollision = true;
+        if (!player->m_touchedGravityPortal && !player->m_maybeTouchedBreakableBlock) result.jumpVars = true;
+        if (player->m_stateBoostX == 999 && player->m_stateScale == 999 && player->m_maybeStateForce2 == 999) {
+            result.stateVars = true;
+        }
+        if (player->m_unk50C == 13579) result.collisionLog = true;
+        ctx.died = false;
+    }
+    this->load(base);
+    this->release(base);
+
+    ctx = saved;
+    result.done = true;
+    return result;
+}
+
+RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& sample) {
+    RunResult result;
+    if (!m_fake || !m_layer || m_ops.empty()) {
+        result.event = Event::Died;
+        result.eventTick = m_tick;
+        result.endTick = m_tick;
+        return result;
+    }
+
+    auto& ctx = fakeContext();
+    FakeContext const saved = ctx;
+    ctx.active = true;
+    ctx.player = m_fake;
+    ctx.sim = this;
+    ctx.died = false;
+    ctx.killer = nullptr;
+
+    auto const begin = std::chrono::steady_clock::now();
+    float const levelEnd = m_layer->m_levelLength;
+
+    while (m_tick < untilTick) {
+        Mode const mode = modeOf(m_fake);
+        bool const want = input(m_tick, mode);
+        // The real game may apply a press one tick late; the bot measures which matches.
+        bool const apply = m_model.inputDelay == 0 ? want : m_previousWant;
+        m_previousWant = want;
+        if (apply != m_held) {
+            if (apply) {
+                m_fake->pushButton(PlayerButton::Jump);
+            }
+            else {
+                m_fake->releaseButton(PlayerButton::Jump);
+            }
+            m_held = apply;
+        }
+
+        this->stepPhysics();
+        m_ticksRun += 1;
+
+        Sample s;
+        s.x = m_fake->getPositionX();
+        s.y = m_fake->getPositionY();
+        s.hold = want;
+        s.mode = mode;
+        s.grounded = m_fake->m_isOnGround;
+        s.ring = m_fake->m_touchedRing || (m_fake->m_touchingRings && m_fake->m_touchingRings->count() > 0);
+        sample(m_tick, s);
+
+        int const tick = m_tick;
+        m_tick += 1;
+        if (ctx.died) {
+            result.event = Event::Died;
+            result.eventTick = tick;
+            m_lastDeath = DeathInfo{};
+            m_lastDeath.valid = true;
+            m_lastDeath.tick = tick;
+            m_lastDeath.x = s.x;
+            m_lastDeath.y = s.y;
+            if (auto* killer = ctx.killer) {
+                m_lastDeath.objectId = killer->m_objectID;
+                m_lastDeath.objectType = static_cast<int>(killer->m_objectType);
+                m_lastDeath.objectX = killer->getPositionX();
+                m_lastDeath.objectY = killer->getPositionY();
+            }
+            break;
+        }
+        if ((levelEnd > 0.f && s.x >= levelEnd) || m_reachedGoal) {
+            result.event = Event::Completed;
+            result.eventTick = tick;
+            break;
+        }
+    }
+
+    m_secondsRun += std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+    ctx = saved;
+    result.endTick = m_tick;
+    return result;
+}
+
+} // namespace ac
