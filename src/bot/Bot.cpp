@@ -15,7 +15,9 @@ namespace {
     // Ticks are GD physics steps, 240 per second.
     constexpr int kHorizon = 200;          // how far each check looks ahead
     constexpr int kFloor = 12;             // ticks after a check starts that it may not change
-    constexpr int kMaxCheckAge = 120;      // how long a search may keep going while the game plays on
+    constexpr int kMaxCheckAge = 180;      // how long a search may keep going while the game plays on
+    constexpr int kFloorSlack = 8;         // grow a running search's fixed part this early
+    constexpr int kFrameTicks = 6;         // physics steps a frame may run (4 at 60 FPS)
     constexpr int kEvery = 16;             // re-check at least this often
     constexpr int kCalibrationTicks = 12;  // prediction window used to measure input timing
     constexpr float kDesyncTolerance = 2.f;
@@ -304,21 +306,50 @@ void Bot::onFrame(PlayLayer* layer) {
     int64_t const budgetMs = baseMs * (urgent || m_rescue ? 3 : 1);
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
 
-    if (m_check && (urgent || now >= m_check->t0 + m_check->floor)) {
-        // A hard search may need more frames than its fixed part lasts. As long as it hasn't
-        // changed anything the real game is about to play, its fixed part just grows with
-        // the real game and the search goes on. Otherwise (or when planning from an
-        // outdated state) start over from here.
+    if (m_check && urgent) {
+        // Planning from an outdated state: start over from here.
+        m_check.reset();
+        m_forceCheck = true;
+    }
+    else if (m_check && m_check->planner) {
+        // A hard search may need more frames than its fixed part lasts. Before the game gets
+        // to the end of that part, it grows with the game: as it is if the search hasn't
+        // changed anything there, or with the search's current path played from now on if
+        // it has (the path it started from dies anyway; dropping the search there threw away
+        // exactly the clicks that were needed, like the second orb on I Spy).
         int const age = static_cast<int>(now) - static_cast<int>(m_check->t0);
-        int const floor = age + kFloor;
-        bool const extended = !urgent && age <= kMaxCheckAge && m_check->planner &&
-            m_check->planner->extendFloor(floor);
-        if (extended) {
-            m_check->floor = floor;
-        }
-        else {
-            m_check.reset();
-            m_forceCheck = true;
+        if (age + kFloorSlack >= m_check->floor) {
+            int const floor = age + kFloor;
+            auto& planner = *m_check->planner;
+            bool moved = false;
+            int newFloor = floor;
+            if (age <= kMaxCheckAge) {
+                if (planner.extendFloor(floor)) {
+                    moved = true;
+                }
+                else if (age < m_check->floor && planner.seedDeath() >= 0 &&
+                         std::min(floor, planner.frontier()) >= age + kFrameTicks &&
+                         planner.commitFloor(std::min(floor, planner.frontier()))) {
+                    // As far as the search's current path is simulated, at least past this
+                    // frame's steps.
+                    newFloor = std::min(floor, planner.frontier());
+                    this->playCommitted(*m_check);
+                    moved = true;
+                }
+                else if (planner.extendFloor(age + kFrameTicks)) {
+                    // Nothing changed in the steps this frame plays: keep searching.
+                    newFloor = age + kFrameTicks;
+                    moved = true;
+                }
+            }
+            if (moved) {
+                m_check->floor = std::max(m_check->floor, newFloor);
+            }
+            else if (age >= m_check->floor || age > kMaxCheckAge) {
+                // The game is playing something the search has already changed: start over.
+                m_check.reset();
+                m_forceCheck = true;
+            }
         }
     }
 
@@ -333,9 +364,13 @@ void Bot::onFrame(PlayLayer* layer) {
         this->startCheck(layer, now, urgent || m_rescue ? 0 : kFloor);
     }
 
-    if (m_check && m_check->t0 < now && !(urgent || m_rescue)) {
-        // A search that already took more than a frame is a hard one: give it more time.
-        deadline = std::max(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(baseMs * 2));
+    if (m_check && m_check->planner && !(urgent || m_rescue)) {
+        // A search that already took more than a frame is a hard one: give it more time,
+        // the most when the death it is fixing is close.
+        int const death = m_check->planner->seedDeath();
+        bool const close = death >= 0 && static_cast<int>(m_check->t0) + death - static_cast<int>(now) < 150;
+        int const factor = close ? 3 : m_check->t0 < now ? 2 : 1;
+        deadline = std::max(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(baseMs * factor));
     }
     if (m_check) {
         m_check->sim->beginSlice();
@@ -673,6 +708,30 @@ void Bot::finishCheck() {
     }
 
     m_check.reset();
+}
+
+void Bot::playCommitted(Check& check) {
+    // The real game plays the search's current path from the end of the fixed part on (as
+    // far as it is simulated); the predictions to compare the game with are that path's.
+    auto const& planner = *check.planner;
+    auto const& bits = planner.pathInputs();
+    auto const& samples = planner.pathSamples();
+    int const end = std::min<int>(planner.frontier(), static_cast<int>(std::min(bits.size(), samples.size())));
+    if (end <= check.floor) return;
+    size_t const need = static_cast<size_t>(check.t0) + static_cast<size_t>(end);
+    if (m_inputs.size() < need) {
+        m_inputs.resize(need, 0);
+        m_samples.resize(need);
+    }
+    if (check.seed.size() < static_cast<size_t>(end)) check.seed.resize(end, 0);
+    for (int rel = check.floor; rel < end; ++rel) {
+        m_inputs[check.t0 + rel] = bits[rel];
+        m_samples[check.t0 + rel] = samples[rel];
+        check.seed[rel] = bits[rel];
+    }
+    check.seedSize = std::max(check.seedSize, end);
+    m_planEnd = static_cast<int>(check.t0) + end;
+    m_planRevision += 1;
 }
 
 std::unique_ptr<FakeSim> Bot::makeSim(PlayLayer* layer, PhysicsModel const& model, int baseStep) const {

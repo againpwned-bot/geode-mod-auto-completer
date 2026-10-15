@@ -869,11 +869,12 @@ int main() {
         chains.push_back({ "late chain, early 2nd orb", ledge });
         for (auto const& [name, rules] : chains) {
             for (PlayStyle style : styles) {
-                for (int stepsPerFrame : { 8, 16 }) {
+                for (int stepsPerFrame : { 4, 8, 16 }) {
+                    int const useCommit = 1;
                     constexpr int kHorizon = 200;
                     constexpr int kFloor = 12;
                     constexpr int kEvery = 16;
-                    constexpr int kMaxAge = 120;
+                    constexpr int kMaxAge = 180;
                     struct Live {
                         int t0 = 0;
                         int floor = 0;
@@ -890,18 +891,48 @@ int main() {
                     bool leaked = false;
                     int extended = 0;
                     int restarted = 0;
+                    int committed = 0;
                     std::unique_ptr<Live> live;
                     Event outcome = Event::None;
                     while (outcome == Event::None && real.tick() < rules.end + 50) {
                         int const now = real.tick();
-                        if (live && now >= live->t0 + live->floor) {
+                        if (live && now + 8 >= live->t0 + live->floor) {
+                            // Like Bot::onFrame: grow the fixed part before the game gets there,
+                            // as it is or with the search's current path committed.
                             int const age = now - live->t0;
+                            auto& planner = *live->planner;
+                            bool moved = false;
+                            int newFloor = age + kFloor;
                             // This planner counts ticks from the level start.
-                            if (age <= kMaxAge && live->planner->extendFloor(now + kFloor)) {
-                                live->floor = age + kFloor;
-                                extended += 1;
+                            if (age <= kMaxAge && useCommit >= 0) {
+                                int const to = std::min(live->t0 + newFloor, planner.frontier());
+                                if (planner.extendFloor(live->t0 + newFloor)) {
+                                    moved = true;
+                                    extended += 1;
+                                }
+                                else if (useCommit > 0 && age < live->floor && planner.seedDeath() >= 0 &&
+                                         to >= now + 6 && planner.commitFloor(to)) {
+                                    // The game plays the search's current path from here on.
+                                    auto const& bits = planner.pathInputs();
+                                    int const end = std::min<int>(planner.frontier(), static_cast<int>(bits.size()));
+                                    if (static_cast<int>(plan.size()) < end) plan.resize(end, 0);
+                                    for (int t = live->t0 + live->floor; t < end; ++t) plan[t] = bits[t];
+                                    planEnd = end;
+                                    newFloor = to - live->t0;
+                                    moved = true;
+                                    committed += 1;
+                                }
+                                else if (useCommit > 0 && planner.extendFloor(now + 6)) {
+                                    // Nothing changed in the steps this frame plays: keep searching.
+                                    newFloor = age + 6;
+                                    moved = true;
+                                    extended += 1;
+                                }
                             }
-                            else {
+                            if (moved) {
+                                live->floor = std::max(live->floor, newFloor);
+                            }
+                            else if (age >= live->floor || age > kMaxAge) {
                                 live->planner.reset();
                                 if (live->sim->liveSnapshots() != 0) leaked = true;
                                 live.reset();
@@ -958,8 +989,8 @@ int main() {
                     }
                     bool const ok = outcome == Event::Completed && !leaked;
                     std::printf(
-                        "sliced %-26s %-8s %d steps/frame %s (%d extended, %d restarted)\n", name, styleName(style),
-                        stepsPerFrame, ok ? "ok" : "FAILED", extended, restarted
+                        "sliced %-26s %-8s %2d steps/frame %s (%d extended, %d committed, %d restarted)\n", name,
+                        styleName(style), stepsPerFrame, ok ? "ok" : "FAILED", extended, committed, restarted
                     );
                     if (!ok) failures++;
                 }

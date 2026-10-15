@@ -111,7 +111,14 @@ int Planner::startHandle() const {
 
 bool Planner::extendFloor(int tick) {
     if (tick <= m_floor) return true;
-    if (tick > static_cast<int>(m_seed.size())) return false;
+    int const seedSize = static_cast<int>(m_seed.size());
+    if (tick > seedSize) {
+        // Past the seed the real game presses nothing: the current path mustn't either.
+        if (m_frontier < tick || static_cast<int>(m_bits.size()) < tick) return false;
+        for (int t = std::max(m_floor, seedSize); t < tick; ++t) {
+            if (m_bits[t]) return false;
+        }
+    }
     // Every decision in [floor, tick) must still be exactly the seed's: that is what the
     // real game is playing meanwhile.
     auto a = m_plan.lower_bound(m_floor);
@@ -128,7 +135,20 @@ bool Planner::extendFloor(int tick) {
         ++b;
     }
     m_floor = tick;
-    m_forcedEnd = std::max(m_forcedEnd, tick);
+    m_forcedEnd = std::max(m_forcedEnd, std::min(tick, seedSize));
+    return true;
+}
+
+bool Planner::commitFloor(int tick) {
+    if (tick <= m_floor) return true;
+    if (m_frontier < tick) return false;
+    m_floor = tick;
+    // The best path so far may have been made of other early decisions; from now on only
+    // paths through the committed ones count.
+    m_maxFrontier = m_frontier;
+    m_bestEnd = 0;
+    m_dirtyFrom = 0;
+    this->syncBest();
     return true;
 }
 
@@ -361,6 +381,8 @@ void Planner::advance() {
 }
 
 void Planner::beginFix(int deathTick) {
+    // The first death is the seed's own: every change comes after it.
+    if (m_seedDeath < 0) m_seedDeath = deathTick;
     int lastDecision = -1;
     auto it = m_plan.lower_bound(deathTick + 1);
     if (it != m_plan.begin()) {

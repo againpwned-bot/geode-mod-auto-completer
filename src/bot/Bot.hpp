@@ -111,6 +111,8 @@ private:
     bool movementSurprise(PlayLayer* layer, unsigned now);
     // Keeps PhysicsModel::portalReach in line with where the real player gets switched.
     void learnPortal(PlayLayer* layer, unsigned tick);
+    // A running search committed its current path: the real game plays it from now on.
+    void playCommitted(Check& check);
     // Logs the orbs and pads the planned path of a stuck check passes near.
     void logOrbsNearPath(Check const& check);
     void retryCheck(bool robust);

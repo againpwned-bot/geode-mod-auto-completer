@@ -149,6 +149,13 @@ public:
     // only possible while the search hasn't changed anything before `tick` (and the seed
     // reaches that far). Returns whether the floor moved.
     bool extendFloor(int tick);
+    // When the search has changed something before `tick` the real game is about to play:
+    // the game will play the current path up to `tick` instead, so those decisions become
+    // final and the search goes on from them. Only possible when the current path is
+    // simulated that far. Afterwards pathInputs()/pathSamples() are what to play.
+    bool commitFloor(int tick);
+    // Where the seed (the path the search started from) dies, -1 if it hasn't.
+    int seedDeath() const { return m_seedDeath; }
 
     // Snapshot handle of the starting state; owned by the planner until it is destroyed.
     int startHandle() const;
@@ -283,6 +290,7 @@ private:
     int m_forcedEnd = 0;
     // The decisions the seed brought in, to tell whether the search changed any.
     std::map<int, Decision> m_seedPlan;
+    int m_seedDeath = -1;
 
     // The simulator is positioned at m_cursorTick following the current plan.
     bool m_cursorValid = false;
