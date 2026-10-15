@@ -73,12 +73,36 @@ Planner::Planner(Simulator& sim, PlannerConfig config, bool initialHold, std::ve
         m_stack.push_back(std::move(entry));
         lastDecision = tick;
     }
+    // The game lets go where the seed ends (it plays nothing after it), also in modes where
+    // only a release does.
+    int const seedEnd = static_cast<int>(m_seed.size());
+    bool const holdsAtEnd = seedEnd > start ? m_seed[seedEnd - 1] != 0 : initialHold;
+    if (holdsAtEnd) {
+        int const tick = std::max(seedEnd, start);
+        Decision release;
+        release.state = false;
+        release.tapLen = 0;
+        m_plan[tick] = release;
+        if (tick >= m_floor) {
+            m_seedPlan[tick] = release;
+            StackEntry entry;
+            entry.tick = tick;
+            entry.decision = release;
+            entry.deathTick = tick + m_cfg.horizonMin + 8;
+            entry.lo = std::max(lastDecision + 1, m_floor);
+            entry.scanNext = tick - 1;
+            m_stack.push_back(std::move(entry));
+        }
+    }
 
     Policy policy;
     policy.held = initialHold;
     if (initialHold) {
+        // Held since before the start: the game keeps holding as long as the seed does.
+        int run = 0;
+        while (start + run < seedEnd && m_seed[start + run]) run += 1;
         policy.pressTick = start;
-        policy.tapLen = m_cfg.tapLen;
+        policy.tapLen = run;
     }
 
     Snap snap;
@@ -141,7 +165,19 @@ bool Planner::extendFloor(int tick) {
 
 bool Planner::commitFloor(int tick) {
     if (tick <= m_floor) return true;
-    if (m_frontier < tick) return false;
+    int const end = std::min<int>(m_frontier, static_cast<int>(std::min(m_bits.size(), m_samples.size())));
+    if (end < tick) return false;
+    // The game plays the current path from the old floor up to where it is simulated, and
+    // nothing after that: it is the seed later floors must agree with, or a click this path
+    // drops later would still be played.
+    m_seed.resize(end, 0);
+    for (int t = m_floor; t < end; ++t) {
+        m_seed[t] = m_bits[t];
+    }
+    m_seedPlan.erase(m_seedPlan.lower_bound(m_floor), m_seedPlan.end());
+    for (auto it = m_plan.lower_bound(m_floor); it != m_plan.end() && it->first < end; ++it) {
+        m_seedPlan.insert(*it);
+    }
     m_floor = tick;
     // The best path so far may have been made of other early decisions; from now on only
     // paths through the committed ones count.

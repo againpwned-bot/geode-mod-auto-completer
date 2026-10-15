@@ -12,6 +12,7 @@
 #include <memory>
 #include <cstdlib>
 #include <string>
+#include <random>
 #include <vector>
 
 using namespace ac;
@@ -385,6 +386,7 @@ public:
         RunResult result;
         while (m_state.tick < untilTick) {
             int const t = m_state.tick;
+            m_ticksRun += 1;
             bool const held = input(t, Mode::Cube);
             auto& s = m_state;
             if (held && !s.held) s.buffered = true;
@@ -448,6 +450,7 @@ public:
         for (bool b : m_live) n += b ? 1 : 0;
         return n;
     }
+    long long ticksRun() const { return m_ticksRun; }
 
 private:
     struct State {
@@ -463,6 +466,7 @@ private:
     State m_state;
     std::vector<State> m_snaps;
     std::vector<bool> m_live;
+    long long m_ticksRun = 0;
 };
 
 Event replayChain(ChainSim::Rules rules, std::vector<uint8_t> const& bits) {
@@ -470,6 +474,200 @@ Event replayChain(ChainSim::Rules rules, std::vector<uint8_t> const& bits) {
     InputFn input = [&](int t, Mode) { return t < static_cast<int>(bits.size()) && bits[t]; };
     SampleFn sample = [](int, Sample const&) {};
     return sim.run(rules.end + 10, input, sample).event;
+}
+
+struct SlicedRun {
+    Event outcome = Event::None;
+    bool leaked = false;
+    int extended = 0;
+    int committed = 0;
+    int restarted = 0;
+    int desyncs = 0;
+};
+
+// How much planning a frame gets: planner steps, or (like the bot's milliseconds) ticks
+// simulated, more for a search that took more than a frame and the most for one whose
+// death is close, a rescue, or right after a stuck search.
+struct FrameBudget {
+    int steps = 0;
+    int simTicks = 0;
+};
+
+// Bot::onFrame on a ChainSim level: each frame the game runs ticksPerFrame physics steps
+// and the planner gets its budget. A search whose fixed part runs out keeps going if it
+// hasn't changed what is being played (extendFloor), or has its current path played
+// (commitFloor, playCommitted), otherwise it starts over; a stuck search is followed at once
+// by one with nothing fixed. The game's state is only ever what it really played.
+SlicedRun runSliced(ChainSim::Rules const& rules, PlayStyle style, FrameBudget budgetPerFrame, int ticksPerFrame) {
+    constexpr int kHorizon = 200;
+    constexpr int kFloor = 12;
+    constexpr int kEvery = 16;
+    constexpr int kMaxAge = 180;
+    constexpr int kFloorSlack = 8;
+    constexpr int kFrameTicks = 6;
+    struct Live {
+        int t0 = 0;
+        int floor = 0;
+        int seedSize = 0;
+        std::unique_ptr<ChainSim> sim; // declared first: outlives the planner
+        std::unique_ptr<Planner> planner;
+    };
+    SlicedRun out;
+    ChainSim real(rules);
+    std::vector<uint8_t> plan;   // m_inputs
+    std::vector<uint8_t> played; // what the game really pressed, per tick
+    int planEnd = 0;
+    int lastCheck = -1000000;
+    bool held = false;
+    bool force = false;
+    bool rescue = false;
+    std::unique_ptr<Live> live;
+
+    // A running or finished search's path must be what the game played up to now:
+    // otherwise it planned from a state the game isn't in.
+    auto checkPath = [&](std::vector<uint8_t> const& bits, int from, int to) {
+        to = std::min({ to, static_cast<int>(played.size()), static_cast<int>(bits.size()) });
+        for (int t = from; t < to; ++t) {
+            if ((bits[t] != 0) != (played[t] != 0)) {
+                out.desyncs += 1;
+                return;
+            }
+        }
+    };
+    auto drop = [&] {
+        live->planner.reset();
+        if (live->sim->liveSnapshots() != 0) out.leaked = true;
+        live.reset();
+    };
+    auto start = [&](int now, int floor) {
+        live = std::make_unique<Live>();
+        live->t0 = now;
+        live->floor = floor;
+        live->sim = std::make_unique<ChainSim>(rules);
+        InputFn replayInput = [&](int t, Mode) { return t < static_cast<int>(played.size()) && played[t]; };
+        SampleFn none = [](int, Sample const&) {};
+        if (now > 0) live->sim->run(now, replayInput, none);
+        // This planner counts ticks from the level start: the seed is what was played, then
+        // the plan up to its end, at most a horizon ahead.
+        std::vector<uint8_t> seed(played.begin(), played.begin() + now);
+        int const seedEnd = std::min(planEnd, now + kHorizon);
+        for (int t = now; t < seedEnd; ++t) seed.push_back(t < static_cast<int>(plan.size()) ? plan[t] : 0);
+        live->seedSize = std::max(seedEnd - now, 0);
+        PlannerConfig config = PlannerConfig::forStyle(style, 5);
+        config.goalTicks = now + kHorizon;
+        config.robust = true;
+        live->planner = std::make_unique<Planner>(*live->sim, config, held, seed, now + floor);
+        lastCheck = now;
+        force = false;
+    };
+    // Bot::playCommitted
+    auto playCommitted = [&] {
+        auto const& planner = *live->planner;
+        auto const& bits = planner.pathInputs();
+        int const end = std::min<int>(planner.frontier(), static_cast<int>(bits.size()));
+        if (end <= live->t0 + live->floor) return;
+        if (static_cast<int>(plan.size()) < end) plan.resize(end, 0);
+        for (int t = live->t0 + live->floor; t < end; ++t) plan[t] = bits[t];
+        live->seedSize = std::max(live->seedSize, end - live->t0);
+        planEnd = end;
+    };
+    // Bot::finishCheck
+    auto finish = [&](bool stuck) {
+        auto const& planner = *live->planner;
+        auto const& bits = planner.inputs();
+        int end = stuck ? planner.bestFrontier() : planner.endTick();
+        end = std::max(std::min<int>(end, static_cast<int>(bits.size())), live->t0);
+        checkPath(bits, live->t0, end);
+        int const from = live->t0 + std::min(live->floor, live->seedSize);
+        if (static_cast<int>(plan.size()) < end) plan.resize(end, 0);
+        for (int t = from; t < end; ++t) plan[t] = bits[t];
+        if (end > from || end > planEnd) planEnd = std::max(end, from);
+    };
+
+    while (out.outcome == Event::None && real.tick() < rules.end + 50) {
+        int const now = real.tick();
+        if (live) {
+            int const age = now - live->t0;
+            if (age + kFloorSlack >= live->floor) {
+                auto& planner = *live->planner;
+                int const floor = age + kFloor;
+                bool moved = false;
+                int newFloor = floor;
+                if (age <= kMaxAge) {
+                    int const to = std::min(floor, planner.frontier() - live->t0);
+                    if (planner.extendFloor(live->t0 + floor)) {
+                        moved = true;
+                        out.extended += 1;
+                    }
+                    else if (age < live->floor && planner.seedDeath() >= 0 && to >= age + kFrameTicks &&
+                             planner.commitFloor(live->t0 + to)) {
+                        newFloor = to;
+                        playCommitted();
+                        moved = true;
+                        out.committed += 1;
+                    }
+                    else if (planner.extendFloor(live->t0 + age + kFrameTicks)) {
+                        newFloor = age + kFrameTicks;
+                        moved = true;
+                        out.extended += 1;
+                    }
+                }
+                if (moved) {
+                    live->floor = std::max(live->floor, newFloor);
+                    checkPath(planner.pathInputs(), live->t0, planner.frontier());
+                }
+                else if (age >= live->floor || age > kMaxAge) {
+                    drop();
+                    force = true;
+                    out.restarted += 1;
+                }
+            }
+        }
+        if (!live && (force || now - lastCheck >= kEvery || planEnd < now + kHorizon / 2)) {
+            start(now, rescue ? 0 : kFloor);
+        }
+        // Bot::onFrame's budget: 3x for a rescue, else 2x once a search took more than a
+        // frame and 3x when the death it is fixing is close.
+        int factor = rescue ? 3 : 1;
+        if (live && !rescue) {
+            int const death = live->planner->seedDeath();
+            bool const close = death >= 0 && death - now < 150; // this planner counts from the level start
+            factor = close ? 3 : live->t0 < now ? 2 : 1;
+        }
+        long long budget = budgetPerFrame.simTicks > 0 ? static_cast<long long>(budgetPerFrame.simTicks) * factor
+                                                        : static_cast<long long>(budgetPerFrame.steps);
+        while (live && budget > 0) {
+            while (budget > 0 && live->planner->status() == Planner::Status::Running) {
+                long long const before = live->sim->ticksRun();
+                live->planner->step();
+                budget -= budgetPerFrame.simTicks > 0 ? std::max(1LL, live->sim->ticksRun() - before) : 1;
+            }
+            auto const status = live->planner->status();
+            if (status == Planner::Status::Running) break;
+            bool const stuck = status == Planner::Status::Stuck;
+            bool const fixedPart = live->floor > 0;
+            finish(stuck);
+            drop();
+            rescue = stuck;
+            if (stuck && fixedPart) {
+                // Plan again at once with nothing fixed (and a bigger budget this frame).
+                start(now, 0);
+                budget += budgetPerFrame.simTicks > 0 ? 2LL * budgetPerFrame.simTicks : 2LL * budgetPerFrame.steps;
+            }
+        }
+        for (int i = 0; i < ticksPerFrame && out.outcome == Event::None; ++i) {
+            int const t = real.tick();
+            bool const want = t < planEnd && t < static_cast<int>(plan.size()) && plan[t];
+            held = want;
+            played.resize(t + 1, 0);
+            played[t] = want;
+            InputFn input = [want](int, Mode) { return want; };
+            SampleFn sample = [](int, Sample const&) {};
+            out.outcome = real.run(t + 1, input, sample).event;
+        }
+    }
+    if (live) drop();
+    return out;
 }
 
 char const* styleName(PlayStyle s) {
@@ -845,9 +1043,7 @@ int main() {
     }
 
     // The chains again, with the planner sliced like in the game: only a few planner steps
-    // per frame, so a search takes many frames. When a search's fixed part runs out it
-    // keeps going if it hasn't changed what is being played (extendFloor), otherwise it
-    // starts over; a stuck search is followed by one with nothing fixed (Bot::onFrame).
+    // per frame, so a search takes many frames (see runSliced).
     {
         // (Not at the very start of a level: before the first plan exists nothing can carry
         // a search over several frames.)
@@ -870,132 +1066,90 @@ int main() {
         for (auto const& [name, rules] : chains) {
             for (PlayStyle style : styles) {
                 for (int stepsPerFrame : { 4, 8, 16 }) {
-                    int const useCommit = 1;
-                    constexpr int kHorizon = 200;
-                    constexpr int kFloor = 12;
-                    constexpr int kEvery = 16;
-                    constexpr int kMaxAge = 180;
-                    struct Live {
-                        int t0 = 0;
-                        int floor = 0;
-                        std::unique_ptr<ChainSim> sim; // declared first: outlives the planner
-                        std::unique_ptr<Planner> planner;
-                    };
-                    ChainSim real(rules);
-                    std::vector<uint8_t> plan;
-                    int planEnd = 0;
-                    int lastCheck = -1000000;
-                    bool held = false;
-                    bool force = false;
-                    bool rescue = false;
-                    bool leaked = false;
-                    int extended = 0;
-                    int restarted = 0;
-                    int committed = 0;
-                    std::unique_ptr<Live> live;
-                    Event outcome = Event::None;
-                    while (outcome == Event::None && real.tick() < rules.end + 50) {
-                        int const now = real.tick();
-                        if (live && now + 8 >= live->t0 + live->floor) {
-                            // Like Bot::onFrame: grow the fixed part before the game gets there,
-                            // as it is or with the search's current path committed.
-                            int const age = now - live->t0;
-                            auto& planner = *live->planner;
-                            bool moved = false;
-                            int newFloor = age + kFloor;
-                            // This planner counts ticks from the level start.
-                            if (age <= kMaxAge && useCommit >= 0) {
-                                int const to = std::min(live->t0 + newFloor, planner.frontier());
-                                if (planner.extendFloor(live->t0 + newFloor)) {
-                                    moved = true;
-                                    extended += 1;
-                                }
-                                else if (useCommit > 0 && age < live->floor && planner.seedDeath() >= 0 &&
-                                         to >= now + 6 && planner.commitFloor(to)) {
-                                    // The game plays the search's current path from here on.
-                                    auto const& bits = planner.pathInputs();
-                                    int const end = std::min<int>(planner.frontier(), static_cast<int>(bits.size()));
-                                    if (static_cast<int>(plan.size()) < end) plan.resize(end, 0);
-                                    for (int t = live->t0 + live->floor; t < end; ++t) plan[t] = bits[t];
-                                    planEnd = end;
-                                    newFloor = to - live->t0;
-                                    moved = true;
-                                    committed += 1;
-                                }
-                                else if (useCommit > 0 && planner.extendFloor(now + 6)) {
-                                    // Nothing changed in the steps this frame plays: keep searching.
-                                    newFloor = age + 6;
-                                    moved = true;
-                                    extended += 1;
-                                }
-                            }
-                            if (moved) {
-                                live->floor = std::max(live->floor, newFloor);
-                            }
-                            else if (age >= live->floor || age > kMaxAge) {
-                                live->planner.reset();
-                                if (live->sim->liveSnapshots() != 0) leaked = true;
-                                live.reset();
-                                force = true;
-                                restarted += 1;
-                            }
-                        }
-                        if (!live && (force || now - lastCheck >= kEvery || planEnd < now + kHorizon / 2)) {
-                            int const floor = rescue ? 0 : kFloor;
-                            live = std::make_unique<Live>();
-                            live->t0 = now;
-                            live->floor = floor;
-                            live->sim = std::make_unique<ChainSim>(rules);
-                            InputFn replayInput = [&](int t, Mode) { return t < static_cast<int>(plan.size()) && plan[t]; };
-                            SampleFn none = [](int, Sample const&) {};
-                            if (now > 0) live->sim->run(now, replayInput, none);
-                            std::vector<uint8_t> full(plan.begin(), plan.begin() + std::min<size_t>(plan.size(), planEnd));
-                            full.resize(std::max<size_t>(full.size(), static_cast<size_t>(now)), 0);
-                            PlannerConfig config = PlannerConfig::forStyle(style, 5);
-                            config.goalTicks = now + kHorizon;
-                            config.robust = true;
-                            live->planner = std::make_unique<Planner>(*live->sim, config, held, full, now + floor);
-                            lastCheck = now;
-                            force = false;
-                        }
-                        if (live) {
-                            for (int i = 0; i < stepsPerFrame && live->planner->status() == Planner::Status::Running; ++i) {
-                                live->planner->step();
-                            }
-                            auto const status = live->planner->status();
-                            if (status != Planner::Status::Running) {
-                                bool const stuck = status == Planner::Status::Stuck;
-                                int end = stuck ? live->planner->bestFrontier() : live->planner->endTick();
-                                end = std::min<int>(end, static_cast<int>(live->planner->inputs().size()));
-                                if (static_cast<int>(plan.size()) < end) plan.resize(end, 0);
-                                for (int t = live->t0 + live->floor; t < end; ++t) plan[t] = live->planner->inputs()[t];
-                                planEnd = std::max(planEnd, end);
-                                live->planner.reset();
-                                if (live->sim->liveSnapshots() != 0) leaked = true;
-                                bool const hadFloor = live->floor > 0;
-                                live.reset();
-                                rescue = stuck;
-                                if (stuck && hadFloor) force = true;
-                            }
-                        }
-                        for (int i = 0; i < 4 && outcome == Event::None; ++i) {
-                            int const t = real.tick();
-                            bool const want = t < planEnd && t < static_cast<int>(plan.size()) && plan[t];
-                            held = want;
-                            InputFn input = [want](int, Mode) { return want; };
-                            SampleFn sample = [](int, Sample const&) {};
-                            outcome = real.run(t + 1, input, sample).event;
-                        }
-                    }
-                    bool const ok = outcome == Event::Completed && !leaked;
+                    SlicedRun const run = runSliced(rules, style, FrameBudget{ stepsPerFrame, 0 }, 4);
+                    bool const ok = run.outcome == Event::Completed && !run.leaked && run.desyncs == 0;
                     std::printf(
-                        "sliced %-26s %-8s %2d steps/frame %s (%d extended, %d committed, %d restarted)\n", name,
-                        styleName(style), stepsPerFrame, ok ? "ok" : "FAILED", extended, committed, restarted
+                        "sliced %-26s %-8s %2d steps/frame %s (%d extended, %d committed, %d restarted, %d desynced)\n",
+                        name, styleName(style), stepsPerFrame, ok ? "ok" : "FAILED", run.extended, run.committed,
+                        run.restarted, run.desyncs
                     );
                     if (!ok) failures++;
                 }
             }
         }
+    }
+
+    // Random orb chains, frame rates and budgets: whatever happens, a search must never
+    // plan from a state the game isn't in (its path before now is what was played) and
+    // must release its snapshots. Levels the planner beats with time to spare must be
+    // beaten sliced too when it gets a few steps per tick.
+    {
+        std::mt19937 rng(20261015);
+        auto pick = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(rng); };
+        int runs = 0;
+        int completed = 0;
+        int solvable = 0;
+        int solvedSliced = 0;
+        int desynced = 0;
+        int leaks = 0;
+        int commits = 0;
+        int restarts = 0;
+        for (int level = 0; level < 150; ++level) {
+            ChainSim::Rules r;
+            r.aFrom = pick(60, 300);
+            r.aTo = r.aFrom + pick(4, 16);
+            r.bFrom = pick(8, 30);
+            r.bTo = r.bFrom + pick(4, 14);
+            r.downDies = r.aTo + pick(10, 120);
+            r.upDies = r.bTo + pick(5, 40);
+            r.end = r.downDies + 300;
+            if (pick(0, 1)) {
+                r.decoyFrom = r.aFrom - pick(0, 40);
+                r.decoyTo = r.decoyFrom + pick(2, 10);
+                r.decoyGain = pick(2, 20);
+            }
+            if (pick(0, 1)) {
+                r.cFrom = pick(4, 20);
+                r.cTo = r.cFrom + pick(3, 10);
+                r.earlyCut = pick(1, r.bTo - r.bFrom);
+            }
+            for (PlayStyle style : styles) {
+                // With all the time it needs (and nothing fixed) can it be beaten at all?
+                bool offline = false;
+                {
+                    ChainSim sim(r);
+                    PlannerConfig config = PlannerConfig::forStyle(style, 5);
+                    config.robust = true;
+                    Planner planner(sim, config, false);
+                    while (planner.step() == Planner::Status::Running) {}
+                    offline = planner.status() == Planner::Status::Completed &&
+                        replayChain(r, planner.inputs()) == Event::Completed;
+                }
+                // (simulated ticks per frame, physics steps per frame): 144 and 60 FPS with
+                // about what the bot simulates in its 4 ms on a heavy level, then starved.
+                for (auto [simTicks, ticksPerFrame] : { std::pair{ 300, 2 }, std::pair{ 300, 4 }, std::pair{ 150, 1 },
+                                                        std::pair{ 60, 4 } }) {
+                    SlicedRun const run = runSliced(r, style, FrameBudget{ 0, simTicks }, ticksPerFrame);
+                    runs += 1;
+                    commits += run.committed;
+                    restarts += run.restarted;
+                    if (run.outcome == Event::Completed) completed += 1;
+                    if (run.desyncs) desynced += 1;
+                    if (run.leaked) leaks += 1;
+                    if (offline && simTicks >= 75 * ticksPerFrame) {
+                        solvable += 1;
+                        if (run.outcome == Event::Completed) solvedSliced += 1;
+                    }
+                }
+            }
+        }
+        bool const ok = desynced == 0 && leaks == 0 && solvedSliced == solvable;
+        std::printf(
+            "sliced random: %d runs, %d completed; %d/%d beatable ones beaten; %d desynced, %d leaked; "
+            "%d commits, %d restarts %s\n",
+            runs, completed, solvedSliced, solvable, desynced, leaks, commits, restarts, ok ? "ok" : "FAILED"
+        );
+        if (!ok) failures++;
     }
 
     std::printf(failures == 0 ? "ALL PASSED\n" : "%d FAILURE(S)\n", failures);
