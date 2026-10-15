@@ -162,6 +162,11 @@ public:
     // Every orb and pad in the level (for the log).
     std::vector<GameObject*> const& orbs() const { return m_orbs; }
 
+    // Orbs and pads the real player used this attempt, and in which physics step.
+    void noteRealActivation(GameObject* object, int step);
+    // -1 if the real player hasn't used it (or it wasn't seen).
+    int realActivationStep(GameObject* object) const;
+
     // Groups and running moves of an object, for the log.
     std::string describe(GameObject* object) const;
     // How far groups really move per unit of a move's offset.
@@ -211,6 +216,7 @@ private:
     std::unordered_map<EffectGameObject*, std::vector<EffectGameObject*>> m_spawned;
     std::unordered_map<int, std::vector<GameObject*>> m_groupObjects;
     std::vector<GameObject*> m_orbs;
+    std::unordered_map<GameObject*, int> m_realActivations;
     bool m_scanned = false;
     bool m_loggedSections = false;
 

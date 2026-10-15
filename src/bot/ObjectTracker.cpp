@@ -736,7 +736,17 @@ std::string ObjectTracker::describe(GameObject* object) const {
     return out + moves;
 }
 
+void ObjectTracker::noteRealActivation(GameObject* object, int step) {
+    if (object) m_realActivations.emplace(object, step);
+}
+
+int ObjectTracker::realActivationStep(GameObject* object) const {
+    auto const it = m_realActivations.find(object);
+    return it == m_realActivations.end() ? -1 : it->second;
+}
+
 void ObjectTracker::resetAttempt() {
+    m_realActivations.clear();
     m_tracks.clear();
     m_moving.clear();
     m_commands.clear();

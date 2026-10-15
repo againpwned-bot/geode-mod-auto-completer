@@ -1,6 +1,8 @@
 #include "PlayerState.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 
 using namespace geode::prelude;
 
@@ -91,6 +93,13 @@ void PlayerFix::capture(PlayerObject* player) {
     nodePosition = player->getPosition();
     rotation = player->getRotation();
     mode = modeOf(player);
+    touchingRings.clear();
+    if (auto* rings = player->m_touchingRings) {
+        for (unsigned i = 0; i < rings->count(); ++i) {
+            touchingRings.push_back(rings->objectAtIndex(i));
+        }
+    }
+    std::memcpy(jumpBuffer.data(), &player->m_jumpRelatedAC2, jumpBuffer.size());
 #define AC_CAPTURE_FIELD(name) name = player->name;
     AC_PLAYER_FIELDS(AC_CAPTURE_FIELD)
 #undef AC_CAPTURE_FIELD
@@ -101,6 +110,13 @@ void PlayerFix::apply(PlayerObject* player) const {
 
     player->setPosition(nodePosition);
     player->setRotation(rotation);
+    if (auto* rings = player->m_touchingRings) {
+        rings->removeAllObjects();
+        for (auto* ring : touchingRings) {
+            rings->addObject(ring);
+        }
+    }
+    std::memcpy(&player->m_jumpRelatedAC2, jumpBuffer.data(), jumpBuffer.size());
 #define AC_APPLY_FIELD(name) player->name = name;
     AC_PLAYER_FIELDS(AC_APPLY_FIELD)
 #undef AC_APPLY_FIELD
@@ -120,6 +136,22 @@ std::string PlayerFix::diff(PlayerFix const& other, size_t limit, size_t* count)
     }
     if (!sameValue(nodePosition, other.nodePosition)) {
         add("node", showValue(nodePosition), showValue(other.nodePosition));
+    }
+    if (jumpBuffer != other.jumpBuffer) {
+        // Stored as random, seed, value; the number is random - seed.
+        auto decode = [](auto const& bytes) {
+            int values[3] = {};
+            std::memcpy(values, bytes.data(), std::min(sizeof(values), bytes.size()));
+            return values[0] - values[1];
+        };
+        int const mine = decode(jumpBuffer);
+        int const theirs = decode(other.jumpBuffer);
+        if (mine != theirs) add("m_jumpRelatedAC2", std::to_string(mine), std::to_string(theirs));
+    }
+    if (touchingRings != other.touchingRings) {
+        add(
+            "m_touchingRings", fmt::format("[{}]", touchingRings.size()), fmt::format("[{}]", other.touchingRings.size())
+        );
     }
 #define AC_DIFF_FIELD(name) \
     if (!sameValue(name, other.name)) add(#name, showValue(name), showValue(other.name));

@@ -212,6 +212,7 @@ FakeSim::FakeSim(
     if (!real || !m_fake) return;
 
     m_fake->copyAttributes(real);
+    this->ownRingList();
     // An earlier simulation may have left the hidden player in another mode.
     setMode(m_fake, from ? from->mode : modeOf(real));
     if (from) {
@@ -227,6 +228,7 @@ FakeSim::FakeSim(
     m_fake->m_playEffects = false;
     m_fake->setVisible(false);
     m_triggerX = m_fake->getPositionX();
+    this->noteTouchingRings();
 }
 
 FakeSim::~FakeSim() {
@@ -263,6 +265,39 @@ void FakeSim::noteObject(GameObject* object) {
     entry.object = enhanced;
     entry.base = read(enhanced);
     m_log.push_back(entry);
+}
+
+void FakeSim::ownRingList() {
+    // The hidden player's list of touched orbs is rewritten on every restore; it must never
+    // be the real player's own list.
+    auto* real = m_layer ? m_layer->m_player1 : nullptr;
+    if (!m_fake || (m_fake->m_touchingRings && (!real || m_fake->m_touchingRings != real->m_touchingRings))) return;
+    auto* own = CCArray::create();
+    own->retain();
+    m_fake->m_touchingRings = own;
+}
+
+void FakeSim::noteTouchingRings() {
+    auto* rings = m_fake ? m_fake->m_touchingRings : nullptr;
+    if (!rings) return;
+    for (unsigned i = rings->count(); i-- > 0;) {
+        auto* object = typeinfo_cast<GameObject*>(rings->objectAtIndex(i));
+        if (!object) continue;
+        if (this->spentByRealPlayer(object)) {
+            // Used up by the real player: a click must not find it.
+            rings->removeObjectAtIndex(i);
+            continue;
+        }
+        this->noteObject(object);
+    }
+}
+
+bool FakeSim::spentByRealPlayer(GameObject* object) const {
+    auto* enhanced = typeinfo_cast<EnhancedGameObject*>(object);
+    if (!enhanced || enhanced->m_isMultiActivate || !enhanced->m_activatedByPlayer1) return false;
+    // Used in a step this simulation replays (the one-tick checks): not used yet here.
+    int const step = ObjectTracker::get().realActivationStep(object);
+    return step < 0 || step < m_baseStep;
 }
 
 namespace {
@@ -334,6 +369,15 @@ namespace {
     }
 }
 
+bool FakeSim::isTurnedPortal(GameObject* object) {
+    if (!object) return false;
+    float speed = 0.f;
+    PortalKind const kind = portalKind(object, speed);
+    if (kind == PortalKind::None || kind == PortalKind::Speed) return false;
+    float const turn = std::fmod(std::abs(object->getRotationX()), 360.f);
+    return turn > 0.5f && turn < 359.5f;
+}
+
 void FakeSim::notePortal(GameObject* object) {
     if (!object || !m_fake) return;
     float speed = 0.f;
@@ -345,9 +389,12 @@ void FakeSim::notePortal(GameObject* object) {
     if (std::find(m_portalsUsed.begin(), m_portalsUsed.end(), object) != m_portalsUsed.end()) return;
     auto const rect = object->getObjectRect();
     if (!m_fake->getObjectRect().intersectsRect(rect)) return;
-    // Touching isn't enough: GD switches the player once its center reaches the portal
-    // (speed portals have their own timing below).
-    if (kind != PortalKind::Speed && m_fake->getPositionX() < rect.getMinX() - m_model.portalReach) return;
+    // Straight portals switch the player on first touch; turned ones once its center
+    // reaches them (speed portals have their own timing below).
+    if (kind != PortalKind::Speed && isTurnedPortal(object) &&
+        m_fake->getPositionX() < rect.getMinX() - m_model.portalReach) {
+        return;
+    }
     m_portalsUsed.push_back(object);
 
     switch (kind) {
@@ -490,6 +537,7 @@ void FakeSim::load(int handle) {
 
     if (reattributeOnLoad() && m_layer && m_layer->m_player1) {
         m_fake->copyAttributes(m_layer->m_player1);
+        this->ownRingList();
     }
     // Mode first: switching modes changes physics fields the snapshot then overwrites.
     setMode(m_fake, slot.mode);
@@ -505,6 +553,9 @@ void FakeSim::load(int handle) {
     m_triggerX = m_fake->getPositionX();
     m_reachedGoal = false;
     m_goalObject = nullptr;
+    // Orbs the restored state is touching may be clicked right away; they must be logged
+    // (with their flags as they are now) before that can happen.
+    this->noteTouchingRings();
     for (size_t i = 0; i < m_log.size(); ++i) {
         write(m_log[i].object, i < slot.flags.size() ? slot.flags[i] : m_log[i].base);
     }
@@ -795,6 +846,8 @@ RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& samp
         m_previousWant = want;
         if (apply != m_held) {
             if (apply) {
+                // The game layer marks this on every click before handing it to the player.
+                m_fake->m_hasEverJumped = true;
                 m_fake->pushButton(PlayerButton::Jump);
             }
             else {

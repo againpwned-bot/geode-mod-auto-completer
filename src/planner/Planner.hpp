@@ -250,8 +250,9 @@ private:
     int m_totalEvals = 0;
     std::vector<TraceEntry> m_trace;
     // Whether a press at `tick` can do anything: in cube, robot, ball and spider a press
-    // only acts on the ground or on an orb, and a press in the air would just be a
-    // buffered input whose effect depends on exact timing.
+    // only acts on the ground or on an orb (one being touched, or one reached while the tap
+    // is still held); any other press in the air would just be a buffered input whose
+    // effect depends on exact timing.
     bool canPressAt(int tick) const;
     // Whether the player touches an orb or ring at `tick` on the current path.
     bool ringAt(int tick) const;

@@ -4,9 +4,11 @@
 
 #include "../planner/Planner.hpp"
 
+#include <array>
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace ac {
 
@@ -64,7 +66,8 @@ Mode modeOf(PlayerObject* player);
     X(m_stateFlipGravity) X(m_gravityMod) X(m_stateForce) X(m_stateForceVector) \
     X(m_affectedByForces) X(m_jumpPadRelated) X(m_playerSpeedAC) X(m_fixRobotJump) \
     X(m_holdingButtons) X(m_inputsLocked) X(m_gv0123) X(m_isOutOfBounds) \
-    X(m_fallStartY) X(m_disablePlayerSqueeze) X(m_enable22Changes) X(m_enableImpulseFix)
+    X(m_fallStartY) X(m_disablePlayerSqueeze) X(m_enable22Changes) X(m_enableImpulseFix) \
+    X(m_lastMovedTime)
 
 // Physics state of a player: copied from the real player onto the hidden simulation
 // player, and saved/restored for the planner's snapshots.
@@ -74,6 +77,13 @@ struct PlayerFix {
     float rotation = 0.f;
     // Game mode; apply() leaves it alone, switching modes takes GD's toggles.
     Mode mode = Mode::Cube;
+    // The orbs the player overlapped in the last collision check (m_touchingRings). A click
+    // at the start of the next step uses one of these, so without them a click on an orb
+    // the player is inside of does nothing.
+    std::vector<cocos2d::CCObject*> touchingRings;
+    // m_jumpRelatedAC2, part of GD's click buffer for orbs. It is an anti-cheat wrapped
+    // number without a default constructor, so it is kept as its raw bytes.
+    std::array<unsigned char, sizeof(geode::SeedValueRSV)> jumpBuffer {};
 
 #define AC_DECLARE_FIELD(name) std::remove_cvref_t<decltype(std::declval<PlayerObject&>().name)> name {};
     AC_PLAYER_FIELDS(AC_DECLARE_FIELD)

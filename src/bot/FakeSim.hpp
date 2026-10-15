@@ -34,10 +34,11 @@ struct PhysicsModel {
     Place stateVars = Place::Start;
     bool preCollision = true;   // run preCollision before each checkCollisions
     bool collisionLog = true;   // run resetCollisionLog(false) once per tick
-    // How far left of a portal's left edge the player's center can be when the portal
-    // switches it. GD 2.2 waits for the center to reach the portal, not just the hitbox
-    // (0); the bot keeps it in line with the portals the real player goes through.
-    float portalReach = 0.f;
+    // Turned (rotated) portals: how far left of the portal box's left edge the player's
+    // center can be when the portal switches it. Straight portals switch on first touch;
+    // turned ones wait for the center (measured on "I Spy": 0.25 to 1.5 units). The bot
+    // keeps it in line with the turned portals the real player goes through.
+    float portalReach = 0.3f;
 
     static constexpr int kVariants = 18;
     // Calibration candidates: input delay x jump variables x state variables.
@@ -169,6 +170,12 @@ public:
 
     // Remembers an orb or pad before the hidden player may activate it.
     void noteObject(GameObject* object);
+    // An orb or pad the real player already used before this simulation's first tick: spent
+    // for the hidden player too. GD keeps "used" per player and the hidden player isn't
+    // player 1, so without this it could use the same orb again.
+    bool spentByRealPlayer(GameObject* object) const;
+    // Portals that switch the player only once its center reaches them (see PhysicsModel).
+    static bool isTurnedPortal(GameObject* object);
     // A toggle orb the hidden player used switches `group` from the next tick on.
     void noteToggle(int group, bool on);
     // Portals are applied by hand, never through the game layer: speed, size and mode
@@ -224,6 +231,11 @@ private:
 
     // Switches the player's game mode with GD's own toggles (no effects).
     static void setMode(PlayerObject* player, Mode mode);
+    // Logs the orbs the hidden player is touching right now, so a click on them is undone
+    // with everything else, and drops the ones the real player already used.
+    void noteTouchingRings();
+    // Gives the hidden player its own list of touched orbs if it shares the real player's.
+    void ownRingList();
     static Flags read(EnhancedGameObject* object);
     static void write(EnhancedGameObject* object, Flags const& flags);
     void restoreBaseline();

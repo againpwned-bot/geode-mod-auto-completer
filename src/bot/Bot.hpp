@@ -149,6 +149,8 @@ private:
     int m_orbLogs = 0;
     int m_goalLogs = 0;
     bool m_desyncFlagged = false;
+    // The last plan check got stuck: plan without a fixed part until one works again.
+    bool m_rescue = false;
 
     // Portal timing: the real player's last portal and its hitbox on the step before.
     GameObject* m_seenPortal = nullptr;

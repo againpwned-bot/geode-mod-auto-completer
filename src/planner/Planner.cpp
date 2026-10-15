@@ -511,7 +511,13 @@ bool Planner::canPressAt(int tick) const {
     bool const groundOnly = before.mode == Mode::Cube || before.mode == Mode::Robot ||
         before.mode == Mode::Ball || before.mode == Mode::Spider;
     if (!groundOnly || before.grounded || before.ring) return true;
-    return tick < static_cast<int>(m_samples.size()) && m_samples[tick].ring;
+    // In the air only an orb answers a click: one being touched, or one reached while the
+    // button is still held (GD activates an orb the player holds into).
+    int const reach = std::max(1, m_cfg.tapLen);
+    for (int t = tick; t < tick + reach && t < static_cast<int>(m_samples.size()); ++t) {
+        if (m_samples[t].ring) return true;
+    }
+    return false;
 }
 
 int Planner::evaluate(int tick, Decision const& decision, int deathTick) {

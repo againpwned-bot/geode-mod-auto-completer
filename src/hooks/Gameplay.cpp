@@ -234,7 +234,8 @@ class $modify(ACBaseGameLayer, GJBaseGameLayer) {
     void collisionCheckObjects(PlayerObject* player, gd::vector<GameObject*>* objects, int objectCount, float dt) {
         auto& ctx = ac::fakeContext();
         if (!ctx.active || player != ctx.player || !objects) {
-            if (!ctx.active && objects && player == m_player1 && isCurrentPlayLayer(this)) {
+            bool const real = !ctx.active && objects && player == m_player1 && isCurrentPlayLayer(this);
+            if (real) {
                 // Learn how objects near the real player move.
                 auto& tracker = ac::ObjectTracker::get();
                 int const count = std::min<int>(objectCount, static_cast<int>(objects->size()));
@@ -243,6 +244,21 @@ class $modify(ACBaseGameLayer, GJBaseGameLayer) {
                 }
             }
             GJBaseGameLayer::collisionCheckObjects(player, objects, objectCount, dt);
+            if (real) {
+                // Which orbs and pads the real player has used, and in which step: they are
+                // spent for simulations that start after that step.
+                auto& tracker = ac::ObjectTracker::get();
+                int const count = std::min<int>(objectCount, static_cast<int>(objects->size()));
+                for (int i = 0; i < count; ++i) {
+                    auto* object = (*objects)[i];
+                    bool activatable = false;
+                    if (!object || !simulatedType(object->m_objectType, activatable) || !activatable) continue;
+                    auto* enhanced = typeinfo_cast<EnhancedGameObject*>(object);
+                    if (enhanced && enhanced->m_activatedByPlayer1) {
+                        tracker.noteRealActivation(object, tracker.worldStep());
+                    }
+                }
+            }
             return;
         }
 
@@ -260,6 +276,8 @@ class $modify(ACBaseGameLayer, GJBaseGameLayer) {
                 continue;
             }
             if (activatable && ctx.sim) {
+                // Already used by the real player: nothing left for the hidden player.
+                if (ctx.sim->spentByRealPlayer(object)) continue;
                 ctx.sim->noteObject(object);
             }
             if (ctx.sim) ctx.sim->placeObject(object);
@@ -383,6 +401,20 @@ class $modify(ACEnhancedGameObject, EnhancedGameObject) {
     void powerOnObject(int state) {
         if (simulating()) return;
         EnhancedGameObject::powerOnObject(state);
+    }
+
+    void activatedByPlayer(PlayerObject* player) {
+        auto& ctx = ac::fakeContext();
+        if (ctx.active) {
+            // Whatever the hidden player uses must be put back afterwards, however GD got
+            // there (a click on an orb it was already touching, for one).
+            if (ctx.sim && player == ctx.player) ctx.sim->noteObject(this);
+        }
+        else if (auto* playLayer = PlayLayer::get(); playLayer && player == playLayer->m_player1) {
+            auto& tracker = ac::ObjectTracker::get();
+            tracker.noteRealActivation(this, tracker.worldStep());
+        }
+        EnhancedGameObject::activatedByPlayer(player);
     }
 };
 

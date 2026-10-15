@@ -143,6 +143,7 @@ void Bot::resetAttempt() {
     m_stats.plannedAhead = 0;
     m_seenPortal = nullptr;
     m_portalPrevKnown = false;
+    m_rescue = false;
     // Each attempt gets its own share of the detailed logs, so the attempt that matters
     // (usually the latest) is in the log too.
     m_surprisesLogged = 0;
@@ -287,8 +288,9 @@ void Bot::onFrame(PlayLayer* layer) {
     // teleport portal, or a mode change the simulation missed): plan again right away from
     // its new state, free to change even the next tick, and within this frame.
     bool const urgent = this->movementSurprise(layer, now);
-    int64_t const budgetMs = std::clamp<int64_t>(settings::liveBudget(), 1, 30) * (urgent ? 3 : 1);
-    auto const deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
+    int64_t const baseMs = std::clamp<int64_t>(settings::liveBudget(), 1, 30);
+    int64_t const budgetMs = baseMs * (urgent || m_rescue ? 3 : 1);
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
 
     if (m_check && (urgent || now >= m_check->t0 + m_check->floor)) {
         // Planning from an outdated state, or too slow to finish before its fixed part ran
@@ -305,7 +307,7 @@ void Bot::onFrame(PlayLayer* layer) {
         static_cast<int>(now) - m_lastCheck >= kEvery ||
         m_planEnd < static_cast<int>(now) + kHorizon / 2;
     if (!m_check && due) {
-        this->startCheck(layer, now, urgent ? 0 : kFloor);
+        this->startCheck(layer, now, urgent || m_rescue ? 0 : kFloor);
     }
 
     if (m_check) {
@@ -323,7 +325,20 @@ void Bot::onFrame(PlayLayer* layer) {
             bool const freshPlan = status == Planner::Status::Stuck && m_check->seeded && !m_check->retried;
             bool const exactPlan = status == Planner::Status::Stuck && !freshPlan && m_check->config.robust;
             if (!freshPlan && !exactPlan) {
+                bool const stuck = status == Planner::Status::Stuck;
+                bool const fixedPart = m_check->floor > 0;
                 this->finishCheck();
+                // Plan checks keep their first ticks fixed, but the way out may need a click
+                // right now: plan again at once from here, free to change even the next tick
+                // (with extra time this frame), until a plan works again.
+                m_rescue = stuck;
+                if (stuck && fixedPart) {
+                    deadline = std::max(
+                        deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(baseMs * 3)
+                    );
+                    this->startCheck(layer, now, 0);
+                    continue;
+                }
                 break;
             }
             // The search can only move the previous plan's jumps earlier, so first plan this
@@ -383,7 +398,8 @@ void Bot::learnPortal(PlayLayer* layer, unsigned tick) {
     m_portalPrevKnown = true;
     if (portal == m_seenPortal) return;
     m_seenPortal = portal;
-    if (!portal || !prevKnown) return;
+    // GD also records pads here; straight portals simply switch on first touch.
+    if (!portal || !prevKnown || !FakeSim::isTurnedPortal(portal)) return;
 
     // The player was switched on this step, so its center was far enough in; if it already
     // touched the portal on the step before, it wasn't then.
@@ -401,9 +417,9 @@ void Bot::learnPortal(PlayLayer* layer, unsigned tick) {
     m_portalLo = lo;
     m_portalHi = hi;
     float const before = m_model.portalReach;
-    // Stay as close to GD's rule (0) as the portals seen allow.
-    m_model.portalReach = std::clamp(0.f, lo, std::max(lo, hi - 0.05f));
-    if (m_portalLogs < 8) {
+    // Stay as close to the measured default as the portals seen allow.
+    m_model.portalReach = std::clamp(PhysicsModel{}.portalReach, lo, std::max(lo, hi - 0.05f));
+    if (m_portalLogs < 4) {
         m_portalLogs += 1;
         log::info(
             "Tick {}: portal {} at ({:.2f}, {:.2f}) switched the player at x {:.3f} (step before {:.3f}{}); "
