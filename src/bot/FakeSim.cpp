@@ -493,6 +493,8 @@ void FakeSim::notePortal(GameObject* object) {
         }
         case PortalKind::Mode:
             if (changesMode(object->m_objectType, m_fake)) {
+                m_modeSwitchTick = m_tick;
+                m_modeSwitchPortal = object;
                 setMode(m_fake, portalMode(object->m_objectType));
                 // What GD records about the portal on the player.
                 m_fake->m_lastPortalPos = ccp(object->m_positionX, object->m_positionY);
@@ -569,6 +571,8 @@ int FakeSim::save() {
     slot.moves = m_moves;
     slot.toggles = m_toggles;
     slot.pendingSpeed = m_pendingSpeed;
+    slot.modeSwitchTick = m_modeSwitchTick;
+    slot.modeSwitchPortal = m_modeSwitchPortal;
     slot.mode = modeOf(m_fake);
     slot.flags.reserve(m_log.size());
     for (auto const& entry : m_log) {
@@ -611,6 +615,8 @@ void FakeSim::load(int handle) {
     m_moves = slot.moves;
     m_toggles = slot.toggles;
     m_pendingSpeed = slot.pendingSpeed;
+    m_modeSwitchTick = slot.modeSwitchTick;
+    m_modeSwitchPortal = slot.modeSwitchPortal;
     m_triggerX = m_fake->getPositionX();
     m_reachedGoal = false;
     m_goalObject = nullptr;
@@ -880,6 +886,50 @@ InlineProbe FakeSim::probeInlines() {
 }
 
 RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& sample) {
+    return this->runLoop(untilTick, input, sample, nullptr);
+}
+
+RunResult FakeSim::runUntil(int untilTick, InputFn const& input, SampleFn const& sample, StopFn const& stop) {
+    return this->runLoop(untilTick, input, sample, &stop);
+}
+
+uint64_t FakeSim::stateKey() const {
+    if (!m_fake) return 0;
+    uint64_t hash = 0xcbf29ce484222325ull;
+    auto mix = [&hash](uint64_t value) {
+        hash ^= value + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+    };
+    auto quantize = [](double value, double scale) {
+        return static_cast<uint64_t>(static_cast<int64_t>(std::llround(value * scale)));
+    };
+    mix(static_cast<uint64_t>(m_tick));
+    mix(quantize(m_fake->getPositionX(), 64.0));
+    mix(quantize(m_fake->getPositionY(), 64.0));
+    mix(quantize(m_fake->m_yVelocity, 4096.0));
+    mix(quantize(m_fake->getRotation(), 4.0));
+    mix(static_cast<uint64_t>(modeOf(m_fake)));
+    mix(m_fake->m_isUpsideDown ? 1 : 0);
+    mix(m_fake->m_isOnGround ? 1 : 0);
+    mix(m_fake->m_isDashing ? 1 : 0);
+    mix(m_fake->m_jumpBuffered ? 1 : 0);
+    mix(quantize(m_fake->m_vehicleSize, 100.0));
+    mix(quantize(m_fake->m_playerSpeed, 1000.0));
+    mix(quantize(m_pendingSpeed, 1000.0));
+    mix(m_held ? 1 : 0);
+    mix(m_previousWant ? 1 : 0);
+    mix(m_portalsUsed.size());
+    mix(m_moves.size());
+    mix(m_toggles.list.size());
+    mix(m_fake->m_touchingRings ? m_fake->m_touchingRings->count() : 0);
+    // Which orbs and pads this path has used.
+    for (auto const& entry : m_log) {
+        auto const flags = read(entry.object);
+        mix((flags.activated ? 1u : 0u) | (flags.byPlayer1 ? 2u : 0u) | (flags.byPlayer2 ? 4u : 0u));
+    }
+    return hash == 0 ? 1 : hash;
+}
+
+RunResult FakeSim::runLoop(int untilTick, InputFn const& input, SampleFn const& sample, StopFn const* stop) {
     RunResult result;
     if (!m_fake || !m_layer || m_ops.empty()) {
         result.event = Event::Died;
@@ -938,6 +988,20 @@ RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& samp
 
         int const tick = m_tick;
         m_tick += 1;
+        if (ctx.died && tick == m_modeSwitchTick && ctx.killer &&
+            (ctx.killer->m_objectType == GameObjectType::Hazard ||
+             ctx.killer->m_objectType == GameObjectType::AnimatedHazard)) {
+            // A hazard in the very step the player goes through a mode portal: GD's portal
+            // handling (new mode's floor and ceiling, its order of checks) isn't simulated,
+            // and the real game has let the player through where the hidden one died (the
+            // ship portal in the spike pit on polarcris). The look-ahead ends at the portal;
+            // the bot plans again from the real player's state right after it.
+            m_reachedGoal = true;
+            m_goalObject = m_modeSwitchPortal;
+            result.event = Event::Completed;
+            result.eventTick = tick;
+            break;
+        }
         if (ctx.died) {
             result.event = Event::Died;
             result.eventTick = tick;
@@ -961,6 +1025,7 @@ RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& samp
             result.eventTick = tick;
             break;
         }
+        if (stop && (*stop)(tick, s)) break;
     }
 
     m_secondsRun += std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();

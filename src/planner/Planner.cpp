@@ -9,6 +9,13 @@ namespace ac {
 
 namespace {
     constexpr int kCompletedSurvival = INT_MAX / 2;
+    // Forward searches one planner may run (each is bounded by PlannerConfig::deepBudget).
+    constexpr int kMaxDeepRuns = 6;
+
+    uint64_t mixKey(uint64_t hash, uint64_t value) {
+        hash ^= value + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2);
+        return hash;
+    }
 }
 
 PlannerConfig PlannerConfig::forStyle(PlayStyle style, uint32_t seed) {
@@ -124,6 +131,7 @@ Planner::Planner(Simulator& sim, PlannerConfig config, bool initialHold, std::ve
 }
 
 Planner::~Planner() {
+    this->clearDeepNodes();
     for (auto const& [tick, snap] : m_snaps) {
         m_sim.release(snap.handle);
     }
@@ -192,7 +200,10 @@ Planner::Status Planner::step() {
     if (m_status != Status::Running) {
         return m_status;
     }
-    if (m_fix.active) {
+    if (m_deep.active) {
+        this->stepDeep();
+    }
+    else if (m_fix.active) {
         this->stepFix();
     }
     else {
@@ -434,7 +445,7 @@ void Planner::beginFix(int deathTick) {
 
     if (m_fix.lo > m_fix.next) {
         m_fix.active = false;
-        this->backtrack();
+        this->deadEnd();
     }
 }
 
@@ -577,7 +588,7 @@ void Planner::chooseExplore(std::vector<Candidate> explore) {
             return this->robustAt(c, true);
         });
         if (pick == ordered.end()) {
-            this->backtrack();
+            this->deadEnd();
             return;
         }
     }
@@ -661,8 +672,11 @@ void Planner::finishFix() {
 
     bool const canExplore = !explore.empty() && this->exploreDepth(false) < m_cfg.exploreDepth;
     if (valid.empty()) {
+        // No single click outlives this death: an orb click that changes how the player dies
+        // (quick, usually the way through an orb chain), else every sequence of clicks from
+        // before it (earlier clicks that need to change, orbs off the path).
         if (canExplore) this->chooseExplore(std::move(explore));
-        else this->backtrack();
+        else this->deadEnd();
         return;
     }
 
@@ -752,7 +766,7 @@ void Planner::finishFix() {
             return this->robustAt(c, c.explore);
         });
         if (pick == ordered.end()) {
-            this->backtrack();
+            this->deadEnd();
             return;
         }
     }
@@ -846,6 +860,320 @@ void Planner::backtrack() {
         }
     }
     this->giveUp(m_maxFrontier);
+}
+
+void Planner::deadEnd() {
+    if (this->beginDeep(m_fix.deathTick)) return;
+    this->backtrack();
+}
+
+bool Planner::beginDeep(int deathTick) {
+    auto& deep = m_deep;
+    if (!m_cfg.deepSearch || deep.active || deathTick == deep.doneFor || m_deepRuns >= kMaxDeepRuns) return false;
+    deep.deathTick = deathTick;
+    deep.doneFor = deathTick;
+    deep.level = 0;
+    deep.lastRoot = INT_MAX;
+    m_deepRuns += 1;
+    if (!this->startDeepLevel()) return false;
+    m_fix.active = false;
+    deep.active = true;
+    return true;
+}
+
+bool Planner::startDeepLevel() {
+    auto& deep = m_deep;
+    this->clearDeepNodes();
+    while (deep.level < static_cast<int>(m_cfg.deepBack.size())) {
+        int const lock = this->lockTick();
+        int const root = std::max(lock, deep.deathTick - m_cfg.deepBack[deep.level]);
+        deep.level += 1;
+        // Further back than the last try (or it would search the same again), before the death.
+        if (root >= deep.lastRoot || root >= deep.deathTick) continue;
+        deep.lastRoot = root;
+
+        // Past this death and every other one found on the way here (a death caused by a
+        // trial click is earlier than the one it was meant to fix).
+        int target = std::max(deep.deathTick, m_maxFrontier) + std::max(m_cfg.deepMargin, m_cfg.horizonMin);
+        if (m_seedDeath >= 0) target = std::max(target, m_seedDeath + std::max(m_cfg.deepMargin, m_cfg.horizonMin));
+        // (Not capped at the look-ahead's goal: a death the last chunk found just past the goal
+        // is still one to get through.)
+        if (target <= root) continue;
+
+        // The current path up to the root, from the snapshot before it.
+        auto const it = m_snaps.find(this->snapAtOrBefore(root));
+        if (it == m_snaps.end()) continue;
+        m_sim.load(it->second.handle);
+        m_cursorValid = false;
+        Policy policy = it->second.policy;
+        InputFn input = [&](int t, Mode mode) {
+            return this->policyInput(policy, t, mode, nullptr, 0);
+        };
+        Sample before;
+        bool known = root - 1 >= 0 && root - 1 < static_cast<int>(m_samples.size());
+        if (known) before = m_samples[root - 1];
+        SampleFn sample = [&](int, Sample const& s) {
+            before = s;
+            known = true;
+        };
+        RunResult const result = m_sim.run(root, input, sample);
+        if (result.event != Event::None || m_sim.tick() != root) continue;
+        int const handle = m_sim.save();
+        if (handle < 0) continue;
+
+        deep.root = root;
+        deep.target = target;
+        deep.expansions = 0;
+        DeepNode node;
+        node.handle = handle;
+        node.tick = root;
+        node.policy = policy;
+        node.actionable = !known || this->deepActionable(root, before);
+        node.ring = known && before.ring;
+        node.mode = known ? before.mode : Mode::Cube;
+        deep.nodes.push_back(std::move(node));
+        deep.open[root].second.push_back(0);
+        this->note(TraceEntry::Kind::Deep, root, target);
+        return true;
+    }
+    return false;
+}
+
+bool Planner::deepActionable(int tick, Sample const& before) const {
+    if (before.ring) return true;
+    switch (before.mode) {
+        case Mode::Cube:
+        case Mode::Robot:
+        case Mode::Ball:
+        case Mode::Spider:
+            return before.grounded;
+        case Mode::Ufo:
+        case Mode::Swing:
+            return (tick - m_deep.root) % 3 == 0;
+        case Mode::Ship:
+        case Mode::Wave:
+            return (tick - m_deep.root) % 4 == 0;
+    }
+    return true;
+}
+
+void Planner::clearDeepNodes() {
+    auto& deep = m_deep;
+    for (auto& node : deep.nodes) {
+        if (node.handle >= 0) m_sim.release(node.handle);
+        node.handle = -1;
+    }
+    deep.nodes.clear();
+    deep.open.clear();
+    deep.seen.clear();
+}
+
+void Planner::stepDeep() {
+    auto& deep = m_deep;
+    if (deep.open.empty() || deep.expansions >= m_cfg.deepBudget) {
+        this->note(TraceEntry::Kind::DeepFailed, deep.root, deep.expansions);
+        if (!this->startDeepLevel()) {
+            this->clearDeepNodes();
+            deep.active = false;
+            // Not even every sequence of clicks from as far back as possible gets through.
+            this->giveUp(m_maxFrontier);
+        }
+        return;
+    }
+
+    // Earliest tick first, so every way through is looked at before going deeper; on a
+    // tick, nodes touching an orb first.
+    auto first = deep.open.begin();
+    auto& rings = first->second.first;
+    auto& others = first->second.second;
+    int index = 0;
+    if (!rings.empty()) {
+        index = rings.back();
+        rings.pop_back();
+    }
+    else {
+        index = others.back();
+        others.pop_back();
+    }
+    if (rings.empty() && others.empty()) deep.open.erase(first);
+    DeepNode node = std::move(deep.nodes[index]);
+    deep.nodes[index].handle = -1;
+    deep.expansions += 1;
+
+    // Before the floor the real game plays the seed; a path that differs there can't be
+    // played any more (the floor moves on while the search runs).
+    int const fixedTo = std::min(node.tick, m_floor);
+    for (int t = deep.root; t < fixedTo; ++t) {
+        if ((node.bits[t - deep.root] != 0) != this->seedBit(t)) {
+            m_sim.release(node.handle);
+            return;
+        }
+    }
+
+    bool const forced = node.tick < m_floor;
+    bool const holdMode = isHoldMode(node.mode);
+    // A click first (on an orb that is the orb click), then going on without one. In tap
+    // modes a click while the last tap is still held does nothing new.
+    bool const canAct = !forced && node.actionable && (holdMode || !node.policy.held);
+    int const options = canAct ? 2 : 1;
+    // The input of tick `t`: what the game plays before the floor, the click at `start`
+    // if `act`, otherwise the tap running out (tap modes) or the hold staying (hold modes).
+    auto inputAt = [this](Policy& policy, std::vector<uint8_t>& bits, int t, Mode mode, bool act, int start) {
+        bool held = false;
+        if (t < m_floor) {
+            held = this->seedBit(t);
+            if (held && !policy.held) {
+                int run = 1;
+                while (this->seedBit(t + run)) run += 1;
+                policy.pressTick = t;
+                policy.tapLen = run;
+            }
+            policy.held = held;
+        }
+        else if (t == start && act) {
+            policy.held = isHoldMode(mode) ? !policy.held : true;
+            if (policy.held) {
+                // Short taps: a long one (Legit Human) would still be held when the next
+                // orb needs a fresh click.
+                policy.pressTick = t;
+                policy.tapLen = std::clamp(m_cfg.tapLen, 1, m_cfg.deepTapLen);
+            }
+            held = policy.held;
+        }
+        else {
+            if (policy.held && !isHoldMode(mode) && t - policy.pressTick >= policy.tapLen) {
+                policy.held = false;
+            }
+            held = policy.held;
+        }
+        bits.push_back(held ? 1 : 0);
+        return held;
+    };
+    for (int option = 0; option < options; ++option) {
+        bool const act = canAct && option == 0;
+        m_sim.load(node.handle);
+        m_cursorValid = false;
+        Policy policy = node.policy;
+        std::vector<uint8_t> bits = node.bits;
+        int const start = node.tick;
+        InputFn input = [&](int t, Mode mode) {
+            return inputAt(policy, bits, t, mode, act, start);
+        };
+        Sample last;
+        bool sampled = false;
+        SampleFn sample = [&](int, Sample const& s) {
+            last = s;
+            sampled = true;
+        };
+        // On to the next tick where a click could make a difference.
+        StopFn stop = [&](int t, Sample const& s) {
+            int const next = t + 1;
+            return next >= m_floor && this->deepActionable(next, s);
+        };
+        RunResult const result = m_sim.runUntil(deep.target, input, sample, stop);
+        if (result.event == Event::Died) continue;
+        int const reached = m_sim.tick();
+        if (result.event == Event::Completed || reached >= deep.target) {
+            int const end = result.event == Event::Completed ? result.eventTick + 1 : reached;
+            this->note(TraceEntry::Kind::DeepFound, end, deep.expansions);
+            m_sim.release(node.handle);
+            node.handle = -1;
+            this->installDeep(bits, deep.root, end);
+            return;
+        }
+
+        uint64_t key = m_sim.stateKey();
+        if (key != 0) {
+            int const tapLeft = policy.held && !holdMode ? std::max(0, policy.pressTick + policy.tapLen - reached) : 0;
+            key = mixKey(key, static_cast<uint64_t>(policy.held));
+            key = mixKey(key, static_cast<uint64_t>(tapLeft));
+            if (!deep.seen.insert(key).second) continue;
+        }
+        auto& bucket = deep.open[reached];
+        if (static_cast<int>(bucket.first.size() + bucket.second.size()) >= m_cfg.deepWidth) continue;
+        int const handle = m_sim.save();
+        if (handle < 0) continue;
+        if (act) {
+            // Right after a click: maybe no other click is needed any more.
+            Policy probePolicy = policy;
+            std::vector<uint8_t> probeBits = bits;
+            InputFn probeInput = [&](int t, Mode mode) {
+                return inputAt(probePolicy, probeBits, t, mode, false, start);
+            };
+            SampleFn none = [](int, Sample const&) {};
+            RunResult const probe = m_sim.run(deep.target, probeInput, none);
+            if (probe.event != Event::Died && (probe.event == Event::Completed || m_sim.tick() >= deep.target)) {
+                int const end = probe.event == Event::Completed ? probe.eventTick + 1 : m_sim.tick();
+                this->note(TraceEntry::Kind::DeepFound, end, deep.expansions);
+                m_sim.release(handle);
+                m_sim.release(node.handle);
+                node.handle = -1;
+                this->installDeep(probeBits, deep.root, end);
+                return;
+            }
+        }
+        DeepNode child;
+        child.handle = handle;
+        child.tick = reached;
+        child.policy = policy;
+        child.actionable = !sampled || this->deepActionable(reached, last);
+        child.ring = sampled && last.ring;
+        child.mode = sampled ? last.mode : node.mode;
+        child.bits = std::move(bits);
+        bool const ring = child.ring;
+        int const childIndex = static_cast<int>(deep.nodes.size());
+        deep.nodes.push_back(std::move(child));
+        (ring ? bucket.first : bucket.second).push_back(childIndex);
+    }
+    m_sim.release(node.handle);
+}
+
+void Planner::installDeep(std::vector<uint8_t> const& bits, int root, int end) {
+    auto& deep = m_deep;
+    this->clearDeepNodes();
+    deep.active = false;
+
+    // From the floor (or the root) on, decisions that play exactly these inputs replace the
+    // old ones; before it the path is what the game plays and stays.
+    int const cut = std::max(root, m_floor);
+    int const stop = std::min(end, root + static_cast<int>(bits.size()));
+    auto bitAt = [&](int t) {
+        int const i = t - root;
+        return i >= 0 && i < static_cast<int>(bits.size()) && bits[i] != 0;
+    };
+    m_plan.erase(m_plan.lower_bound(cut), m_plan.end());
+    m_stack.erase(
+        std::remove_if(m_stack.begin(), m_stack.end(), [cut](StackEntry const& e) { return e.tick >= cut; }),
+        m_stack.end()
+    );
+    int lastDecision = m_plan.empty() ? -1 : m_plan.rbegin()->first;
+    for (int t = cut; t < stop; ++t) {
+        bool const held = bitAt(t);
+        // Always one at the cut, so the hold state there is exactly the one searched.
+        if (t != cut && held == bitAt(t - 1)) continue;
+        Decision decision;
+        decision.state = held;
+        if (held) {
+            int run = 1;
+            while (t + run < stop && bitAt(t + run)) run += 1;
+            decision.tapLen = run;
+        }
+        m_plan[t] = decision;
+        StackEntry entry;
+        entry.tick = t;
+        entry.decision = decision;
+        entry.deathTick = deep.deathTick;
+        entry.lo = std::max(lastDecision + 1, m_floor);
+        entry.scanNext = entry.lo - 1; // nothing left to scan for it
+        m_stack.push_back(std::move(entry));
+        lastDecision = t;
+    }
+
+    m_fix.active = false;
+    this->markDirty(cut);
+    this->invalidateAfter(cut);
+    m_frontier = this->snapAtOrBefore(cut);
+    m_cursorValid = false;
 }
 
 } // namespace ac

@@ -92,6 +92,8 @@ void PlayerFix::capture(PlayerObject* player) {
 
     nodePosition = player->getPosition();
     rotation = player->getRotation();
+    scaleX = player->getScaleX();
+    scaleY = player->getScaleY();
     mode = modeOf(player);
     touchingRings.clear();
     if (auto* rings = player->m_touchingRings) {
@@ -110,6 +112,8 @@ void PlayerFix::apply(PlayerObject* player) const {
 
     player->setPosition(nodePosition);
     player->setRotation(rotation);
+    player->setScaleX(scaleX);
+    player->setScaleY(scaleY);
     if (auto* rings = player->m_touchingRings) {
         rings->removeAllObjects();
         for (auto* ring : touchingRings) {
@@ -120,6 +124,10 @@ void PlayerFix::apply(PlayerObject* player) const {
 #define AC_APPLY_FIELD(name) player->name = name;
     AC_PLAYER_FIELDS(AC_APPLY_FIELD)
 #undef AC_APPLY_FIELD
+    // GD caches the hitbox and its rotated box; built for the state before, they would
+    // collide the restored player at the wrong place until it next moves.
+    player->m_isObjectRectDirty = true;
+    player->m_isOrientedBoxDirty = true;
 }
 
 std::string PlayerFix::diff(PlayerFix const& other, size_t limit, size_t* count) const {
@@ -136,6 +144,11 @@ std::string PlayerFix::diff(PlayerFix const& other, size_t limit, size_t* count)
     }
     if (!sameValue(nodePosition, other.nodePosition)) {
         add("node", showValue(nodePosition), showValue(other.nodePosition));
+    }
+    if (!sameValue(scaleX, other.scaleX) || !sameValue(scaleY, other.scaleY)) {
+        add(
+            "scale", fmt::format("{:.3f}x{:.3f}", scaleX, scaleY), fmt::format("{:.3f}x{:.3f}", other.scaleX, other.scaleY)
+        );
     }
     if (jumpBuffer != other.jumpBuffer) {
         // Stored as random, seed, value; the number is random - seed.

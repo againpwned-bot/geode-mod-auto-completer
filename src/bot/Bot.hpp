@@ -190,6 +190,9 @@ private:
     bool m_deathPending = false;
     std::string m_deathKiller;
     int m_shadowInputLogged = 0;
+    // Ticks where the hidden player's hitbox or death disagreed with the real player's.
+    int m_hitboxLogs = 0;
+    int m_falseDeathLogs = 0;
     long m_shadowInputTicks = 0;
     long m_shadowInputMismatches = 0;
     int m_selfTests = 0;

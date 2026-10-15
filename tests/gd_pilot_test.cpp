@@ -116,6 +116,19 @@ public:
         return result;
     }
 
+    uint64_t stateKey() const override {
+        uint64_t hash = 0xcbf29ce484222325ull;
+        auto mix = [&hash](uint64_t v) { hash ^= v + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2); };
+        auto q = [](float v) { return static_cast<uint64_t>(static_cast<int64_t>(std::lround(v * 256.f))); };
+        mix(static_cast<uint64_t>(m_state.tick));
+        mix(q(m_state.x));
+        mix(q(m_state.y));
+        mix(q(m_state.vy * 16.f));
+        mix((m_state.onGround ? 1u : 0u) | (m_state.held ? 2u : 0u) | (m_state.buffered ? 4u : 0u));
+        for (uint8_t used : m_state.usedOrbs) mix(used);
+        return hash == 0 ? 1 : hash;
+    }
+
     void copyStateFrom(GdSim const& other) {
         m_state = other.m_state;
         m_state.tick = 0;
@@ -365,6 +378,9 @@ PilotResult pilot(Level const& level, PlayStyle style, int jitterPercent, uint32
                             case Kind::Explore: std::printf(" try%d", t0 + e.a); break;
                             case Kind::Backtrack: std::printf(" undo%d", t0 + e.a); break;
                             case Kind::GiveUp: std::printf(" giveup"); break;
+                            case Kind::Deep: std::printf(" | deep %d..%d", t0 + e.a, t0 + e.b); break;
+                            case Kind::DeepFound: std::printf(" found%d(%d)", t0 + e.a, e.b); break;
+                            case Kind::DeepFailed: std::printf(" none(%d)", e.b); break;
                         }
                     }
                     std::printf("\n");

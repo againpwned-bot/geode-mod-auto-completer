@@ -75,6 +75,9 @@ struct PlayerFix {
     bool valid = false;
     cocos2d::CCPoint nodePosition;
     float rotation = 0.f;
+    // Node scale (mini size and the like): part of what GD builds the hitbox from.
+    float scaleX = 1.f;
+    float scaleY = 1.f;
     // Game mode; apply() leaves it alone, switching modes takes GD's toggles.
     Mode mode = Mode::Cube;
     // The orbs the player overlapped in the last collision check (m_touchingRings). A click

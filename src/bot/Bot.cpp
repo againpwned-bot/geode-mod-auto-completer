@@ -13,9 +13,10 @@ namespace ac {
 
 namespace {
     // Ticks are GD physics steps, 240 per second.
-    constexpr int kHorizon = 200;          // how far each check looks ahead
+    constexpr int kHorizon = 300;          // how far each check looks ahead (1.25 s: a trap is seen
+                                           // while the clicks that avoid it can still change)
     constexpr int kFloor = 12;             // ticks after a check starts that it may not change
-    constexpr int kMaxCheckAge = 180;      // how long a search may keep going while the game plays on
+    constexpr int kMaxCheckAge = 280;      // how long a search may keep going while the game plays on
     constexpr int kFloorSlack = 8;         // grow a running search's fixed part this early
     constexpr int kFrameTicks = 6;         // physics steps a frame may run (4 at 60 FPS)
     constexpr int kEvery = 16;             // re-check at least this often
@@ -174,6 +175,8 @@ void Bot::onLevelInit(PlayLayer* layer) {
     m_probe = InlineProbe{};
     m_shadowLogged = 0;
     m_shadowInputLogged = 0;
+    m_hitboxLogs = 0;
+    m_falseDeathLogs = 0;
     m_shadowInputTicks = 0;
     m_shadowInputMismatches = 0;
     m_selfTests = 0;
@@ -644,6 +647,9 @@ void Bot::logTrace(Planner const& planner, unsigned t0) {
             case Kind::Explore: out += fmt::format(" -> try {}", e.a); break;
             case Kind::Backtrack: out += fmt::format(" | undo {}", e.a); break;
             case Kind::GiveUp: out += fmt::format(" | give up at {}", e.a); break;
+            case Kind::Deep: out += fmt::format(" | search every click from {} to {}", e.a, e.b); break;
+            case Kind::DeepFound: out += fmt::format(": through to {} ({} steps)", e.a, e.b); break;
+            case Kind::DeepFailed: out += fmt::format(": nothing ({} steps)", e.b); break;
         }
     }
     log::info("Search from tick {} (tick:survival):{}", t0, out.empty() ? " none" : out);
@@ -975,6 +981,36 @@ void Bot::runShadow(PlayLayer* layer) {
                 count, fields
             );
         }
+    }
+    // The hitbox itself (what collisions use) must match too, and the hidden player must
+    // not die where the real one doesn't.
+    auto showRect = [](cocos2d::CCRect const& r) {
+        return fmt::format("({:.2f},{:.2f} {:.2f}x{:.2f})", r.origin.x, r.origin.y, r.size.width, r.size.height);
+    };
+    auto const realRect = real->getObjectRect();
+    auto const fakeRect = fake->getObjectRect();
+    bool const sameBox = std::abs(realRect.origin.x - fakeRect.origin.x) < 0.01f &&
+        std::abs(realRect.origin.y - fakeRect.origin.y) < 0.01f &&
+        std::abs(realRect.size.width - fakeRect.size.width) < 0.01f &&
+        std::abs(realRect.size.height - fakeRect.size.height) < 0.01f;
+    if (!sameBox && m_hitboxLogs < 6) {
+        m_hitboxLogs += 1;
+        log::info(
+            "Tick check {}: hitboxes differ: real {}, hidden {} (mode {}, scale {:.3f}x{:.3f} / {:.3f}x{:.3f})",
+            m_tickBefore, showRect(realRect), showRect(fakeRect), modeName(modeOf(real)), real->getScaleX(),
+            real->getScaleY(), fake->getScaleX(), fake->getScaleY()
+        );
+    }
+    if (auto const& death = sim.lastDeath(); death.valid && m_falseDeathLogs < 6) {
+        m_falseDeathLogs += 1;
+        cocos2d::CCRect killerRect;
+        if (death.object) killerRect = death.object->getObjectRect();
+        log::info(
+            "Tick check {}: the hidden player died by obj {} type {} at ({:.1f},{:.1f}) hitbox {} but the real player "
+            "didn't; real hitbox {}, hidden {}, mode {}",
+            m_tickBefore, death.objectId, death.objectType, death.objectX, death.objectY, showRect(killerRect),
+            showRect(realRect), showRect(fakeRect), modeName(modeOf(real))
+        );
     }
     if (m_stats.shadowTicks % 1200 == 0) {
         log::info(

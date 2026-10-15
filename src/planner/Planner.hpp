@@ -17,12 +17,14 @@
 //      next best alternative (depth first search with a work budget).
 
 #include <algorithm>
+#include <array>
 #include <climits>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <optional>
 #include <random>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -53,6 +55,8 @@ struct Sample {
 using InputFn = std::function<bool(int, Mode)>;
 // sample(tick, sample) is called after every executed tick
 using SampleFn = std::function<void(int, Sample const&)>;
+// stop(tick, sample), after every executed tick: true ends the run there
+using StopFn = std::function<bool(int, Sample const&)>;
 
 struct RunResult {
     Event event = Event::None;
@@ -73,6 +77,24 @@ public:
     // Execute ticks until tick() >= untilTick or an event happens. May overshoot untilTick
     // when the underlying engine advances several ticks at once.
     virtual RunResult run(int untilTick, InputFn const& input, SampleFn const& sample) = 0;
+    // Like run(), but also ends right after a tick for which `stop` returns true.
+    virtual RunResult runUntil(int untilTick, InputFn const& input, SampleFn const& sample, StopFn const& stop) {
+        RunResult result;
+        while (this->tick() < untilTick) {
+            bool halt = false;
+            result = this->run(this->tick() + 1, input, [&](int t, Sample const& s) {
+                sample(t, s);
+                halt = stop(t, s);
+            });
+            if (result.event != Event::None || halt) break;
+        }
+        result.endTick = this->tick();
+        return result;
+    }
+    // A hash of everything about the current state that decides what happens next
+    // (tick, position, velocity, mode, input state, orbs used...), so a search can merge
+    // paths that reach the same state. 0: unknown, nothing is merged.
+    virtual uint64_t stateKey() const { return 0; }
 };
 
 struct PlannerConfig {
@@ -97,6 +119,17 @@ struct PlannerConfig {
     // many in a row; each needs this much room before its own death for the next click.
     int exploreDepth = 2;
     int exploreRoom = 8;
+    // When no single click outlives a death: search forward over every sequence of clicks
+    // (orb clicks first) from this many ticks before the death, further back each time it
+    // fails (never before the floor), until the player survives `deepMargin` ticks past
+    // that death. Paths that reach the same state are merged. At most `deepBudget`
+    // expansions per start.
+    bool deepSearch = true;
+    std::array<int, 3> deepBack{ 60, 140, 280 };
+    int deepMargin = 40;
+    int deepBudget = 3000;
+    int deepWidth = 96; // states kept per tick
+    int deepTapLen = 3; // longest tap it uses
     uint32_t seed = 0;
 
     static PlannerConfig forStyle(PlayStyle style, uint32_t seed);
@@ -162,10 +195,14 @@ public:
 
     // What the search did, for diagnostics (bounded).
     struct TraceEntry {
-        enum class Kind : uint8_t { Fix, Eval, Choose, Explore, Backtrack, GiveUp };
+        enum class Kind : uint8_t { Fix, Eval, Choose, Explore, Backtrack, GiveUp, Deep, DeepFound, DeepFailed };
         Kind kind = Kind::Eval;
-        int a = 0; // Fix: death tick, Eval: tick, Choose/Explore/Backtrack/GiveUp: tick
-        int b = 0; // Fix: lowest tick scanned, Eval: survival past the death
+        // Fix: death tick, Eval: tick, Choose/Explore/Backtrack/GiveUp: tick, Deep: start tick,
+        // DeepFound: tick survived to, DeepFailed: start tick
+        int a = 0;
+        // Fix: lowest tick scanned, Eval: survival past the death, Deep: tick to survive to,
+        // DeepFound/DeepFailed: expansions used
+        int b = 0;
     };
     std::vector<TraceEntry> const& trace() const { return m_trace; }
 
@@ -227,6 +264,41 @@ private:
     void stepFix();
     void finishFix();
     void backtrack();
+    // No single click helps: the forward search if it can start, else backtracking.
+    void deadEnd();
+
+    // Forward search over click sequences (see PlannerConfig::deepSearch).
+    struct DeepNode {
+        int handle = -1;         // snapshot at `tick`, before that tick runs
+        int tick = 0;
+        Policy policy;
+        bool actionable = false; // a click at `tick` can do something
+        bool ring = false;       // touching an orb before `tick`
+        Mode mode = Mode::Cube;
+        std::vector<uint8_t> bits; // input of every tick from the start of the search to `tick`
+    };
+    struct DeepSearch {
+        bool active = false;
+        int deathTick = 0;
+        int level = 0;  // index into deepBack
+        int root = 0;   // tick the search starts from
+        int target = 0; // tick to survive to
+        int expansions = 0;
+        std::vector<DeepNode> nodes;
+        // Open nodes by tick (earliest first); orb nodes are taken first within a tick.
+        std::map<int, std::pair<std::vector<int>, std::vector<int>>> open;
+        std::unordered_set<uint64_t> seen;
+        int lastRoot = INT_MAX; // start of the last try
+        int doneFor = -1; // death tick the last search was for
+    };
+    bool beginDeep(int deathTick);
+    bool startDeepLevel();
+    void stepDeep();
+    void clearDeepNodes();
+    void installDeep(std::vector<uint8_t> const& bits, int root, int end);
+    // Whether a click at `tick` can do anything, given the state after the tick before.
+    bool deepActionable(int tick, Sample const& before) const;
+    bool seedBit(int tick) const { return tick >= 0 && tick < static_cast<int>(m_seed.size()) && m_seed[tick]; }
     // Survival past `deathTick` with `decision` at `tick`. `chances`: how many ticks after
     // the click another click could still do something (on the ground, on a new orb, or in
     // a mode that always answers), before that path ends.
@@ -298,6 +370,8 @@ private:
     Policy m_cursorPolicy;
 
     FixSearch m_fix;
+    DeepSearch m_deep;
+    int m_deepRuns = 0;
 };
 
 } // namespace ac

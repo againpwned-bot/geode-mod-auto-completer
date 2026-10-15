@@ -208,6 +208,8 @@ public:
     void load(int handle) override;
     void release(int handle) override;
     RunResult run(int untilTick, InputFn const& input, SampleFn const& sample) override;
+    RunResult runUntil(int untilTick, InputFn const& input, SampleFn const& sample, StopFn const& stop) override;
+    uint64_t stateKey() const override;
 
     // Remembers an orb or pad before the hidden player may activate it.
     void noteObject(GameObject* object);
@@ -266,6 +268,8 @@ private:
         std::vector<MoveCommand> moves;
         ObjectTracker::ToggleSet toggles;
         float pendingSpeed = 0.f;
+        int modeSwitchTick = -1;
+        GameObject* modeSwitchPortal = nullptr;
         Mode mode = Mode::Cube;
         bool used = false;
     };
@@ -277,6 +281,7 @@ private:
     void noteTouchingRings();
     // Gives the hidden player its own list of touched orbs if it shares the real player's.
     void ownRingList();
+    RunResult runLoop(int untilTick, InputFn const& input, SampleFn const& sample, StopFn const* stop);
     static Flags read(EnhancedGameObject* object);
     static void write(EnhancedGameObject* object, Flags const& flags);
     void restoreBaseline();
@@ -321,6 +326,9 @@ private:
     std::vector<GameObject*> m_portalsUsed;
     bool m_reachedGoal = false;
     GameObject* m_goalObject = nullptr;
+    // Tick the hidden player last switched game mode at a portal, and that portal.
+    int m_modeSwitchTick = -1;
+    GameObject* m_modeSwitchPortal = nullptr;
     std::vector<LogEntry> m_log;
     std::unordered_set<EnhancedGameObject*> m_logged;
     std::vector<Slot> m_slots;

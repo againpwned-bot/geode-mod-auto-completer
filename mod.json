@@ -5,7 +5,7 @@
 	},
 	"id": "againpwned.auto-completer",
 	"name": "Auto Completer",
-	"version": "v1.8.1",
+	"version": "v1.9.0",
 	"developer": "againpwned",
 	"description": "Pathfinding bot that plays levels for you in real time, with play styles, a path viewer and a Mega Hack style menu.",
 	"tags": [
