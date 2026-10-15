@@ -17,6 +17,7 @@
 //      next best alternative (depth first search with a work budget).
 
 #include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -144,6 +145,10 @@ public:
     // Live use: ticks before `tick` have already been played for real, so decisions
     // there are final and the planner will never change them.
     void setFloor(int tick) { m_floor = std::max(m_floor, tick); }
+    // Like setFloor, for a search that runs while the real game keeps playing the seed:
+    // only possible while the search hasn't changed anything before `tick` (and the seed
+    // reaches that far). Returns whether the floor moved.
+    bool extendFloor(int tick);
 
     // Snapshot handle of the starting state; owned by the planner until it is destroyed.
     int startHandle() const;
@@ -179,6 +184,7 @@ private:
         Decision decision;
         int survival = 0;
         bool explore = false; // an orb click that only changes how the player dies
+        int chances = 0;      // ticks after the click where another click could act
     };
 
     struct StackEntry {
@@ -201,6 +207,7 @@ private:
         int next = 0;          // next candidate tick to evaluate
         int firstValid = -1;
         int invalidStreak = 0;
+        int bestSurvival = INT_MIN; // of the valid candidates
         std::vector<Candidate> valid;
         std::vector<Candidate> explore; // die elsewhere or sooner, but differently
     };
@@ -213,7 +220,10 @@ private:
     void stepFix();
     void finishFix();
     void backtrack();
-    int evaluate(int tick, Decision const& decision, int deathTick);
+    // Survival past `deathTick` with `decision` at `tick`. `chances`: how many ticks after
+    // the click another click could still do something (on the ground, on a new orb, or in
+    // a mode that always answers), before that path ends.
+    int evaluate(int tick, Decision const& decision, int deathTick, int* chances = nullptr);
 
     void applyDecision(int tick, Decision const& decision);
     void invalidateAfter(int tick);
@@ -271,6 +281,8 @@ private:
     int m_floor = 0;
     std::vector<uint8_t> m_seed;
     int m_forcedEnd = 0;
+    // The decisions the seed brought in, to tell whether the search changed any.
+    std::map<int, Decision> m_seedPlan;
 
     // The simulator is positioned at m_cursorTick following the current plan.
     bool m_cursorValid = false;

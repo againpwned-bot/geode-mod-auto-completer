@@ -14,6 +14,7 @@ namespace {
     // Ticks are GD physics steps, 240 per second.
     constexpr int kHorizon = 200;          // how far each check looks ahead
     constexpr int kFloor = 12;             // ticks after a check starts that it may not change
+    constexpr int kMaxCheckAge = 120;      // how long a search may keep going while the game plays on
     constexpr int kEvery = 16;             // re-check at least this often
     constexpr int kCalibrationTicks = 12;  // prediction window used to measure input timing
     constexpr float kDesyncTolerance = 2.f;
@@ -293,10 +294,21 @@ void Bot::onFrame(PlayLayer* layer) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
 
     if (m_check && (urgent || now >= m_check->t0 + m_check->floor)) {
-        // Planning from an outdated state, or too slow to finish before its fixed part ran
-        // out; start over from here.
-        m_check.reset();
-        m_forceCheck = true;
+        // A hard search may need more frames than its fixed part lasts. As long as it hasn't
+        // changed anything the real game is about to play, its fixed part just grows with
+        // the real game and the search goes on. Otherwise (or when planning from an
+        // outdated state) start over from here.
+        int const age = static_cast<int>(now) - static_cast<int>(m_check->t0);
+        int const floor = age + kFloor;
+        bool const extended = !urgent && age <= kMaxCheckAge && m_check->planner &&
+            m_check->planner->extendFloor(floor);
+        if (extended) {
+            m_check->floor = floor;
+        }
+        else {
+            m_check.reset();
+            m_forceCheck = true;
+        }
     }
 
     if (!m_check && !m_calibration.active) {
@@ -310,6 +322,10 @@ void Bot::onFrame(PlayLayer* layer) {
         this->startCheck(layer, now, urgent || m_rescue ? 0 : kFloor);
     }
 
+    if (m_check && m_check->t0 < now && !(urgent || m_rescue)) {
+        // A search that already took more than a frame is a hard one: give it more time.
+        deadline = std::max(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(baseMs * 2));
+    }
     if (m_check) {
         m_check->sim->beginSlice();
         while (true) {

@@ -62,6 +62,7 @@ Planner::Planner(Simulator& sim, PlannerConfig config, bool initialHold, std::ve
         decision.state = current;
         decision.tapLen = current ? run : 0;
         m_plan[tick] = decision;
+        m_seedPlan[tick] = decision;
 
         StackEntry entry;
         entry.tick = tick;
@@ -106,6 +107,29 @@ Planner::~Planner() {
 
 int Planner::startHandle() const {
     return m_startHandle;
+}
+
+bool Planner::extendFloor(int tick) {
+    if (tick <= m_floor) return true;
+    if (tick > static_cast<int>(m_seed.size())) return false;
+    // Every decision in [floor, tick) must still be exactly the seed's: that is what the
+    // real game is playing meanwhile.
+    auto a = m_plan.lower_bound(m_floor);
+    auto b = m_seedPlan.lower_bound(m_floor);
+    while (true) {
+        bool const aIn = a != m_plan.end() && a->first < tick;
+        bool const bIn = b != m_seedPlan.end() && b->first < tick;
+        if (!aIn && !bIn) break;
+        if (aIn != bIn || a->first != b->first || a->second.state != b->second.state ||
+            a->second.tapLen != b->second.tapLen) {
+            return false;
+        }
+        ++a;
+        ++b;
+    }
+    m_floor = tick;
+    m_forcedEnd = std::max(m_forcedEnd, tick);
+    return true;
 }
 
 Planner::Status Planner::step() {
@@ -359,9 +383,17 @@ void Planner::beginFix(int deathTick) {
 void Planner::stepFix() {
     auto& fix = m_fix;
 
-    bool const windowDone = fix.firstValid >= 0 &&
+    bool windowDone = fix.firstValid >= 0 &&
         (fix.firstValid - fix.next > m_cfg.windowCap || fix.invalidStreak >= 2);
-    if (fix.next < fix.lo || windowDone) {
+    // Only marginal fixes so far (a late orb click that dies a few ticks later): keep
+    // scanning while the player is on an orb, an earlier click on it may be the real way
+    // through (and becomes an orb click to explore).
+    if (windowDone && m_cfg.exploreDepth > 0 && fix.bestSurvival < std::min(m_cfg.clearTicks, m_cfg.horizonMax) &&
+        this->ringAt(fix.next)) {
+        windowDone = false;
+    }
+    // The floor may have moved up while the search ran (live use).
+    if (fix.next < std::max(fix.lo, this->lockTick()) || windowDone) {
         this->finishFix();
         return;
     }
@@ -378,11 +410,13 @@ void Planner::stepFix() {
         return;
     }
     Decision decision = this->makeDecision(!current);
-    int survival = this->evaluate(tick, decision, fix.deathTick);
+    int chances = 0;
+    int survival = this->evaluate(tick, decision, fix.deathTick, &chances);
     this->note(TraceEntry::Kind::Eval, tick, survival);
 
     if (survival >= m_cfg.horizonMin) {
-        fix.valid.push_back(Candidate{ tick, decision, survival });
+        fix.valid.push_back(Candidate{ tick, decision, survival, false, chances });
+        fix.bestSurvival = std::max(fix.bestSurvival, survival);
         if (fix.firstValid < 0) {
             fix.firstValid = tick;
         }
@@ -392,10 +426,12 @@ void Planner::stepFix() {
     if (fix.firstValid >= 0) {
         fix.invalidStreak += 1;
     }
-    // An orb click that ends differently, with room left for another click before that end.
+    // An orb click that ends differently, with room left for another click before that end,
+    // and somewhere on the way where that click could act (an orb that only sends the player
+    // into the next hazard with nothing to click on is a dead end however late it dies).
     if (m_cfg.exploreDepth > 0 && survival != 0 && fix.deathTick + survival - tick >= m_cfg.exploreRoom &&
-        this->ringAt(tick)) {
-        fix.explore.push_back(Candidate{ tick, decision, survival, true });
+        chances > 0 && this->ringAt(tick)) {
+        fix.explore.push_back(Candidate{ tick, decision, survival, true, chances });
     }
 }
 
@@ -411,8 +447,9 @@ bool Planner::robustAt(Candidate const& c, bool explore) {
     // death by a few ticks could still mean landing on the next spike.
     int const need = std::max(m_cfg.horizonMin, std::min(c.survival, m_cfg.horizonMax) - 3);
     bool const current = c.tick < static_cast<int>(m_bits.size()) && m_bits[c.tick];
+    int const lo = std::max(m_fix.lo, this->lockTick());
     for (int neighbour : { c.tick - 1, c.tick + 1 }) {
-        if (neighbour < m_fix.lo || neighbour > m_fix.deathTick) return false;
+        if (neighbour < lo || neighbour > m_fix.deathTick) return false;
         bool const held = neighbour < static_cast<int>(m_bits.size()) && m_bits[neighbour];
         if (held != current) continue;
         int const survival = this->evaluate(neighbour, c.decision, m_fix.deathTick);
@@ -520,7 +557,7 @@ bool Planner::canPressAt(int tick) const {
     return false;
 }
 
-int Planner::evaluate(int tick, Decision const& decision, int deathTick) {
+int Planner::evaluate(int tick, Decision const& decision, int deathTick, int* chances) {
     m_regionEvals += 1;
     m_totalEvals += 1;
 
@@ -532,9 +569,18 @@ int Planner::evaluate(int tick, Decision const& decision, int deathTick) {
     InputFn input = [&](int t, Mode mode) {
         return this->policyInput(policy, t, mode, &decision, tick);
     };
-    SampleFn sample = [](int, Sample const&) {};
+    int count = 0;
+    bool leftOrb = false; // left the orb the click was on (it is used up)
+    SampleFn sample = [&](int t, Sample const& s) {
+        if (!chances || t <= tick) return;
+        bool const groundOnly = s.mode == Mode::Cube || s.mode == Mode::Robot || s.mode == Mode::Ball ||
+            s.mode == Mode::Spider;
+        if (!s.ring) leftOrb = true;
+        if (!groundOnly || s.grounded || (s.ring && leftOrb)) count += 1;
+    };
 
     RunResult result = m_sim.run(deathTick + m_cfg.horizonMax + 1, input, sample);
+    if (chances) *chances = count;
     switch (result.event) {
         case Event::Completed: return kCompletedSurvival;
         case Event::Died: return result.eventTick - deathTick;
@@ -549,6 +595,11 @@ void Planner::finishFix() {
     auto explore = std::move(m_fix.explore);
     m_fix.valid.clear();
     m_fix.explore.clear();
+    // Clicks the floor has passed meanwhile can't be made any more.
+    int const lock = this->lockTick();
+    auto passed = [lock](Candidate const& c) { return c.tick < lock; };
+    valid.erase(std::remove_if(valid.begin(), valid.end(), passed), valid.end());
+    explore.erase(std::remove_if(explore.begin(), explore.end(), passed), explore.end());
 
     bool const canExplore = !explore.empty() && this->exploreDepth(false) < m_cfg.exploreDepth;
     if (valid.empty()) {
@@ -692,6 +743,13 @@ void Planner::backtrack() {
                 alternatives.end()
             );
         }
+        // Nor clicks the floor has passed (live use).
+        top.alternatives.erase(
+            std::remove_if(
+                top.alternatives.begin(), top.alternatives.end(), [lock](Candidate const& c) { return c.tick < lock; }
+            ),
+            top.alternatives.end()
+        );
         if (!top.alternatives.empty()) {
             Candidate alt = top.alternatives.front();
             top.alternatives.erase(top.alternatives.begin());
