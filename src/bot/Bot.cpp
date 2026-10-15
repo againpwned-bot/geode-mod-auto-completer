@@ -141,6 +141,16 @@ void Bot::resetAttempt() {
     m_usedThisAttempt = false;
     m_stats.clicks = 0;
     m_stats.plannedAhead = 0;
+    m_seenPortal = nullptr;
+    m_portalPrevKnown = false;
+    // Each attempt gets its own share of the detailed logs, so the attempt that matters
+    // (usually the latest) is in the log too.
+    m_surprisesLogged = 0;
+    m_orbLogs = 0;
+    m_goalLogs = 0;
+    m_tracesLogged = 0;
+    m_diagnoses = 0;
+    m_portalLogs = 0;
     m_attempt += 1;
 }
 
@@ -155,15 +165,12 @@ void Bot::onLevelInit(PlayLayer* layer) {
     m_model = PhysicsModel{};
     m_probe = InlineProbe{};
     m_shadowLogged = 0;
-    m_surprisesLogged = 0;
-    m_orbLogs = 0;
-    m_goalLogs = 0;
     m_shadowInputLogged = 0;
     m_shadowInputTicks = 0;
     m_shadowInputMismatches = 0;
     m_selfTests = 0;
-    m_tracesLogged = 0;
-    m_diagnoses = 0;
+    m_portalLo = -1e9f;
+    m_portalHi = 1e9f;
     m_simTicks = 0;
     m_simSeconds = 0.0;
     TickRecorder::get().reset();
@@ -363,6 +370,49 @@ bool Bot::movementSurprise(PlayLayer* layer, unsigned now) {
         );
     }
     return true;
+}
+
+void Bot::learnPortal(PlayLayer* layer, unsigned tick) {
+    auto* player = layer->m_player1;
+    GameObject* portal = player->m_lastActivatedPortal;
+    auto const playerRect = player->getObjectRect();
+    bool const prevKnown = m_portalPrevKnown && m_portalPrevTick + 1 == tick;
+    cocos2d::CCRect const prevRect = m_portalPrevRect;
+    m_portalPrevRect = playerRect;
+    m_portalPrevTick = tick;
+    m_portalPrevKnown = true;
+    if (portal == m_seenPortal) return;
+    m_seenPortal = portal;
+    if (!portal || !prevKnown) return;
+
+    // The player was switched on this step, so its center was far enough in; if it already
+    // touched the portal on the step before, it wasn't then.
+    auto const rect = portal->getObjectRect();
+    float const reached = rect.getMinX() - playerRect.getMidX();
+    bool const touchedBefore = prevRect.intersectsRect(rect);
+    float const missed = rect.getMinX() - prevRect.getMidX();
+    float lo = std::max(m_portalLo, reached);
+    float hi = touchedBefore ? std::min(m_portalHi, missed) : m_portalHi;
+    if (lo >= hi) {
+        // Doesn't fit the earlier portals: trust this one.
+        lo = reached;
+        hi = touchedBefore ? missed : 1e9f;
+    }
+    m_portalLo = lo;
+    m_portalHi = hi;
+    float const before = m_model.portalReach;
+    // Stay as close to GD's rule (0) as the portals seen allow.
+    m_model.portalReach = std::clamp(0.f, lo, std::max(lo, hi - 0.05f));
+    if (m_portalLogs < 8) {
+        m_portalLogs += 1;
+        log::info(
+            "Tick {}: portal {} at ({:.2f}, {:.2f}) switched the player at x {:.3f} (step before {:.3f}{}); "
+            "portal box x {:.2f}..{:.2f} y {:.2f}..{:.2f}, rotation {:.0f}, scale {:.2f}x{:.2f}; reach {:.2f} -> {:.2f}",
+            tick, portal->m_objectID, portal->m_positionX, portal->m_positionY, playerRect.getMidX(), prevRect.getMidX(),
+            touchedBefore ? ", touching" : "", rect.getMinX(), rect.getMaxX(), rect.getMinY(), rect.getMaxY(),
+            portal->getRotationX(), portal->getScaleX(), portal->getScaleY(), before, m_model.portalReach
+        );
+    }
 }
 
 void Bot::startCheck(PlayLayer* layer, unsigned now, int floor) {
@@ -728,6 +778,7 @@ void Bot::closeTick(PlayLayer* layer) {
     if (m_state != BotState::Playing || !layer || !layer->m_player1) return;
     auto const actual = layer->m_player1->getPosition();
     unsigned const tick = m_tickBefore;
+    this->learnPortal(layer, tick);
 
     auto& cal = m_calibration;
     if (cal.active) {

@@ -164,9 +164,8 @@ public:
 
     // Groups and running moves of an object, for the log.
     std::string describe(GameObject* object) const;
-    // How far groups really move per unit of a move's offset: 1 unless measurements clearly
-    // show another simple factor.
-    double offsetScale() const { return m_offsetScale; }
+    // How far groups really move per unit of a move's offset.
+    double offsetScale() const { return 1.0; }
 
     void resetAttempt();
     void resetLevel();
@@ -222,7 +221,7 @@ private:
     int m_leadCount = 0;
     std::vector<double> m_ratios; // latest measurements, as a ring
     int m_ratioCount = 0;
-    double m_offsetScale = 1.0;
+    bool m_ratioOffLogged = false;
 };
 
 } // namespace ac

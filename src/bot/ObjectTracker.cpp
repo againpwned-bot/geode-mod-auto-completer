@@ -393,23 +393,17 @@ void ObjectTracker::calibrate(GameObject* object, int from, int to, double dx, d
     m_ratioCount += 1;
     if (m_ratioCount % 16 != 0) return;
 
-    // The median shrugs off objects that something else moves too. GD's factor is a simple
-    // one, so anything near 1 is 1.
+    // Offsets are applied 1:1 (checked in game); guessing another factor from the median made
+    // it flip between factors on levels where other things move the same groups. The
+    // measurement only goes to the log, once, and again if it looks off.
     std::vector<double> sorted = m_ratios;
     std::sort(sorted.begin(), sorted.end());
     double const median = sorted[sorted.size() / 2];
-    double scale = 1.0;
-    if (median < 0.8 || median > 1.25) {
-        for (double factor : { 1.0 / 3.0, 0.5, 2.0, 3.0 }) {
-            if (std::abs(median - factor) <= factor * 0.15) scale = factor;
-        }
+    bool const off = median < 0.8 || median > 1.25;
+    if (m_ratioCount == 16 || (off && !m_ratioOffLogged)) {
+        if (off) m_ratioOffLogged = true;
+        log::info("Moves measured at {:.2f}x their trigger offset ({} samples)", median, m_ratioCount);
     }
-    if (m_ratioCount == 16 || scale != m_offsetScale) {
-        log::info(
-            "Moves measured at {:.2f}x their trigger offset ({} samples); using {:.2f}x", median, m_ratioCount, scale
-        );
-    }
-    m_offsetScale = scale;
 }
 
 bool ObjectTracker::commandFor(EffectGameObject* trigger, int start, MoveCommand& out) const {
@@ -563,9 +557,11 @@ void ObjectTracker::auditTriggers(double playerX) {
     if (m_triggers.empty()) return;
     double const lead = this->activationLead();
     if (m_auditIndex < 0) {
-        // Start with the first trigger still ahead of the player.
+        // Start with the first trigger still ahead of the player. Triggers before the level
+        // start fire while the level resets, before the attempt (and its record) begins.
+        double const from = std::max(playerX, 0.0) - lead;
         auto const it = std::upper_bound(
-            m_triggers.begin(), m_triggers.end(), playerX - lead, [](double x, PositionTrigger const& t) { return x < t.x; }
+            m_triggers.begin(), m_triggers.end(), from, [](double x, PositionTrigger const& t) { return x < t.x; }
         );
         m_auditIndex = static_cast<int>(it - m_triggers.begin());
         return;
@@ -767,6 +763,9 @@ void ObjectTracker::resetLevel() {
     m_unfired = 0;
     m_unfiredOff = 0;
     m_unfiredLogged = 0;
+    m_ratios.clear();
+    m_ratioCount = 0;
+    m_ratioOffLogged = false;
 }
 
 } // namespace ac

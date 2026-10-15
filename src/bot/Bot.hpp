@@ -109,6 +109,8 @@ private:
     // Whether the real player's mode, gravity or dual state changed in a way the plan
     // didn't predict.
     bool movementSurprise(PlayLayer* layer, unsigned now);
+    // Keeps PhysicsModel::portalReach in line with where the real player gets switched.
+    void learnPortal(PlayLayer* layer, unsigned tick);
     // Logs the orbs and pads the planned path of a stuck check passes near.
     void logOrbsNearPath(Check const& check);
     void retryCheck(bool robust);
@@ -147,6 +149,16 @@ private:
     int m_orbLogs = 0;
     int m_goalLogs = 0;
     bool m_desyncFlagged = false;
+
+    // Portal timing: the real player's last portal and its hitbox on the step before.
+    GameObject* m_seenPortal = nullptr;
+    cocos2d::CCRect m_portalPrevRect;
+    unsigned m_portalPrevTick = 0;
+    bool m_portalPrevKnown = false;
+    // Reach the real portals allowed so far: at least lo, less than hi.
+    float m_portalLo = -1e9f;
+    float m_portalHi = 1e9f;
+    int m_portalLogs = 0;
 
     Calibration m_calibration;
     std::array<double, PhysicsModel::kVariants> m_variantError {};

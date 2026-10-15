@@ -178,6 +178,7 @@ private:
         int tick = 0;
         Decision decision;
         int survival = 0;
+        bool explore = false; // an orb click that only changes how the player dies
     };
 
     struct StackEntry {
@@ -258,6 +259,10 @@ private:
     // `explore`: the neighbours must end the same way instead of surviving.
     bool robustAt(Candidate const& c, bool explore);
     void chooseExplore(std::vector<Candidate> explore);
+    // Orb clicks that end the same way, middle of the longest such window first.
+    std::vector<Candidate> orderExplore(std::vector<Candidate> explore) const;
+    // Exploring decisions on the stack, leaving out the top one if `skipTop`.
+    int exploreDepth(bool skipTop) const;
     void note(TraceEntry::Kind kind, int a, int b = 0) {
         if (m_trace.size() < 600) m_trace.push_back(TraceEntry{ kind, a, b });
     }

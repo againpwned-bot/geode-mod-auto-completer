@@ -343,7 +343,11 @@ void FakeSim::notePortal(GameObject* object) {
     // portals do nothing in GD.
     if (object->m_isGroupDisabled || object->m_isDisabled || object->m_isNoTouch) return;
     if (std::find(m_portalsUsed.begin(), m_portalsUsed.end(), object) != m_portalsUsed.end()) return;
-    if (!m_fake->getObjectRect().intersectsRect(object->getObjectRect())) return;
+    auto const rect = object->getObjectRect();
+    if (!m_fake->getObjectRect().intersectsRect(rect)) return;
+    // Touching isn't enough: GD switches the player once its center reaches the portal
+    // (speed portals have their own timing below).
+    if (kind != PortalKind::Speed && m_fake->getPositionX() < rect.getMinX() - m_model.portalReach) return;
     m_portalsUsed.push_back(object);
 
     switch (kind) {

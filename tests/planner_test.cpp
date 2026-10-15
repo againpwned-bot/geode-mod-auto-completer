@@ -355,6 +355,10 @@ public:
         int downDies = 120;          // staying down dies here
         int upDies = 45;             // ticks after A that being up dies
         int end = 600;
+        // A decoy: jumping in this window while down buys a few ticks and then dies anyway
+        // (like jumping off the ceiling into the next hazard).
+        int decoyFrom = -1, decoyTo = -1;
+        int decoyGain = 8;
     };
     explicit ChainSim(Rules rules) : m_rules(rules) {}
 
@@ -383,7 +387,11 @@ public:
             s.held = held;
 
             bool ring = false;
-            if (s.phase == 0 && t >= m_rules.aFrom && t <= m_rules.aTo) {
+            if (s.phase == 0 && s.buffered && t >= m_rules.decoyFrom && t <= m_rules.decoyTo) {
+                s.phase = 3;
+                s.buffered = false;
+            }
+            else if (s.phase == 0 && t >= m_rules.aFrom && t <= m_rules.aTo) {
                 ring = true;
                 if (s.buffered) {
                     s.phase = 1;
@@ -405,12 +413,13 @@ public:
             out.y = s.phase == 1 ? 100.f : 0.f;
             out.hold = held;
             out.mode = Mode::Cube;
-            out.grounded = s.phase != 1;
+            out.grounded = s.phase == 0 || s.phase == 2;
             out.ring = ring;
             sample(t, out);
 
             bool const died = (s.phase == 0 && t >= m_rules.downDies) ||
-                (s.phase == 1 && t >= s.flipTick + m_rules.upDies);
+                (s.phase == 1 && t >= s.flipTick + m_rules.upDies) ||
+                (s.phase == 3 && t >= m_rules.downDies + m_rules.decoyGain);
             if (died || t + 1 >= m_rules.end) {
                 result.event = died ? Event::Died : Event::Completed;
                 result.eventTick = t;
@@ -682,6 +691,10 @@ int main() {
         dead.bFrom = 50;
         dead.bTo = 60; // B only after being up already killed the player
         chains.push_back({ "orb chain, no way out", dead });
+        ChainSim::Rules decoy;
+        decoy.decoyFrom = 70;
+        decoy.decoyTo = 110;
+        chains.push_back({ "orb chain + decoy jumps", decoy });
 
         for (auto const& [name, rules] : chains) {
             bool const solvable = rules.bFrom < rules.upDies;
@@ -725,6 +738,10 @@ int main() {
         late.downDies = 300;
         late.end = 700;
         chains.push_back({ "late orb chain", late });
+        ChainSim::Rules decoy;
+        decoy.decoyFrom = 70;
+        decoy.decoyTo = 110;
+        chains.push_back({ "orb chain + decoy jumps", decoy });
         for (auto const& [name, rules] : chains) {
             for (PlayStyle style : styles) {
                 constexpr int kHorizon = 200;

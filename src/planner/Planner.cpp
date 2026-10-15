@@ -395,7 +395,7 @@ void Planner::stepFix() {
     // An orb click that ends differently, with room left for another click before that end.
     if (m_cfg.exploreDepth > 0 && survival != 0 && fix.deathTick + survival - tick >= m_cfg.exploreRoom &&
         this->ringAt(tick)) {
-        fix.explore.push_back(Candidate{ tick, decision, survival });
+        fix.explore.push_back(Candidate{ tick, decision, survival, true });
     }
 }
 
@@ -422,7 +422,8 @@ bool Planner::robustAt(Candidate const& c, bool explore) {
     return true;
 }
 
-void Planner::chooseExplore(std::vector<Candidate> explore) {
+std::vector<Planner::Candidate> Planner::orderExplore(std::vector<Candidate> explore) const {
+    if (explore.empty()) return explore;
     // Clicks that end the same way form windows; the middle of the longest one is the
     // click that still ends that way a tick earlier or later.
     std::sort(explore.begin(), explore.end(), [](Candidate const& a, Candidate const& b) {
@@ -459,6 +460,21 @@ void Planner::chooseExplore(std::vector<Candidate> explore) {
         return std::abs(a.tick - target) < std::abs(b.tick - target);
     });
     ordered.insert(ordered.end(), rest.begin(), rest.end());
+    for (auto& c : ordered) c.explore = true;
+    return ordered;
+}
+
+int Planner::exploreDepth(bool skipTop) const {
+    int depth = 0;
+    size_t const count = skipTop && !m_stack.empty() ? m_stack.size() - 1 : m_stack.size();
+    for (size_t i = 0; i < count; ++i) {
+        if (m_stack[i].explore) depth += 1;
+    }
+    return depth;
+}
+
+void Planner::chooseExplore(std::vector<Candidate> explore) {
+    std::vector<Candidate> ordered = this->orderExplore(std::move(explore));
 
     auto pick = ordered.begin();
     if (m_cfg.robust) {
@@ -528,16 +544,10 @@ void Planner::finishFix() {
     m_fix.valid.clear();
     m_fix.explore.clear();
 
+    bool const canExplore = !explore.empty() && this->exploreDepth(false) < m_cfg.exploreDepth;
     if (valid.empty()) {
-        auto const depth = std::count_if(m_stack.begin(), m_stack.end(), [](StackEntry const& entry) {
-            return entry.explore;
-        });
-        if (explore.empty() || depth >= m_cfg.exploreDepth) {
-            this->backtrack();
-        }
-        else {
-            this->chooseExplore(std::move(explore));
-        }
+        if (canExplore) this->chooseExplore(std::move(explore));
+        else this->backtrack();
         return;
     }
 
@@ -609,13 +619,22 @@ void Planner::finishFix() {
     std::vector<Candidate> ordered = std::move(top);
     ordered.insert(ordered.end(), rest.begin(), rest.end());
 
+    if (canExplore) {
+        // Orb clicks that change how the player dies are worth a try too: first when every
+        // real fix only buys a few ticks (likely a dead end, like jumping into the next
+        // hazard), otherwise once the real fixes have failed.
+        auto extra = this->orderExplore(std::move(explore));
+        bool const marginal = best < std::min(m_cfg.clearTicks, m_cfg.horizonMax);
+        ordered.insert(marginal ? ordered.begin() : ordered.end(), extra.begin(), extra.end());
+    }
+
     auto pick = ordered.begin();
     if (m_cfg.robust) {
         // The click must also work a tick earlier and later, so a small timing error in
         // the real game can't kill and the next obstacle keeps some room. Only the best
         // candidates are checked, in order, to keep this cheap.
         pick = std::find_if(ordered.begin(), ordered.end(), [this](Candidate const& c) {
-            return this->robustAt(c, false);
+            return this->robustAt(c, c.explore);
         });
         if (pick == ordered.end()) {
             this->backtrack();
@@ -626,7 +645,7 @@ void Planner::finishFix() {
     ordered.erase(pick);
 
     this->applyDecision(chosen.tick, chosen.decision);
-    this->note(TraceEntry::Kind::Choose, chosen.tick);
+    this->note(chosen.explore ? TraceEntry::Kind::Explore : TraceEntry::Kind::Choose, chosen.tick);
 
     StackEntry entry;
     entry.tick = chosen.tick;
@@ -635,6 +654,7 @@ void Planner::finishFix() {
     entry.deathTick = m_fix.deathTick;
     entry.lo = m_fix.lo;
     entry.scanNext = m_fix.next;
+    entry.explore = chosen.explore;
     m_stack.push_back(std::move(entry));
 }
 
@@ -656,11 +676,22 @@ void Planner::backtrack() {
         m_plan.erase(oldTick);
         this->note(TraceEntry::Kind::Backtrack, oldTick);
 
+        // Exploring alternatives only while the chain of them stays short.
+        if (this->exploreDepth(true) >= m_cfg.exploreDepth) {
+            auto& alternatives = top.alternatives;
+            alternatives.erase(
+                std::remove_if(
+                    alternatives.begin(), alternatives.end(), [](Candidate const& c) { return c.explore; }
+                ),
+                alternatives.end()
+            );
+        }
         if (!top.alternatives.empty()) {
             Candidate alt = top.alternatives.front();
             top.alternatives.erase(top.alternatives.begin());
             top.tick = alt.tick;
             top.decision = alt.decision;
+            top.explore = alt.explore;
             m_plan[alt.tick] = alt.decision;
 
             int const from = std::min(oldTick, alt.tick);

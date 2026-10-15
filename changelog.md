@@ -1,3 +1,10 @@
+# v1.4.0
+- Fix: the hidden player switched mode at portals too early. GD only switches the player once its center reaches the portal, not as soon as the hitboxes touch, so the bot believed it was a ship or ball a few ticks (on big or turned portals, dozens of ticks) before it really was, planned the tight part after the portal for the wrong mode and then had to scramble right after it ("panicking"). The simulation now uses GD's rule, and the bot checks every portal the real player goes through and adjusts if the game disagrees (logged).
+- Fix: in tight spots the planner could settle for a click that only bought a few ticks (like jumping into the next hazard) and never try the orb click that leads to the real way through. When every plain fix is that short, orb clicks that change how the player would die are now tried first; otherwise they are kept as fallbacks when the plain fixes fail.
+- Fix: the measured move scale could flip between 1x, 0.5x and 0.33x on levels where several things move the same groups, throwing moving hazards and orbs off. Moves are now always applied 1:1 (the measurement is only logged).
+- Fix: move triggers placed before the level start were reported as "didn't fire" on every attempt; GD fires those while the level resets.
+- Logs: the detailed logs (plans, stuck checks, orbs near the path, look-ahead stops, mode changes) now restart every attempt instead of running out after the first few attempts.
+
 # v1.3.9
 - Fix: switched-off portals (toggled off, disabled or "no touch") still counted in the simulation. A gravity, dual or teleport portal ends the look-ahead, so on "I Spy" a fake portal made the bot stop looking ahead before the hazard, believe the path was fine and never plan the orb click. GD ignores such portals and now so does the bot.
 - Logs: when the look-ahead ends at a portal, the log says which portal and where.

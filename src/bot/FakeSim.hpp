@@ -34,6 +34,10 @@ struct PhysicsModel {
     Place stateVars = Place::Start;
     bool preCollision = true;   // run preCollision before each checkCollisions
     bool collisionLog = true;   // run resetCollisionLog(false) once per tick
+    // How far left of a portal's left edge the player's center can be when the portal
+    // switches it. GD 2.2 waits for the center to reach the portal, not just the hitbox
+    // (0); the bot keeps it in line with the portals the real player goes through.
+    float portalReach = 0.f;
 
     static constexpr int kVariants = 18;
     // Calibration candidates: input delay x jump variables x state variables.
