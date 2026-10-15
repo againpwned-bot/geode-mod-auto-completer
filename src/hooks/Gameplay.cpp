@@ -356,6 +356,13 @@ class $modify(ACPlayerObject, PlayerObject) {
     }
 
     void update(float dt) {
+        if (!simulating()) {
+            // How the game's clocks move per physics step, for the simulations.
+            auto* playLayer = PlayLayer::get();
+            if (playLayer && this == playLayer->m_player1) {
+                ac::LayerClock::get().observe(playLayer, ac::ObjectTracker::get().worldStep());
+            }
+        }
         auto& recorder = ac::TickRecorder::get();
         recorder.enter(this, ac::TickOp::Kind::Update, dt, false);
         PlayerObject::update(dt);

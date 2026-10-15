@@ -141,6 +141,67 @@ FakeContext& fakeContext() {
     return context;
 }
 
+LayerClock& LayerClock::get() {
+    static LayerClock clock;
+    return clock;
+}
+
+LayerClock::Saved LayerClock::save(GJBaseGameLayer* layer) {
+    Saved saved;
+    if (!layer) return saved;
+    saved.timestamp = layer->m_timestamp;
+    saved.currentStep = layer->m_currentStep;
+    saved.progress = layer->m_gameState.m_currentProgress;
+    saved.levelTime = layer->m_gameState.m_levelTime;
+    saved.totalTime = layer->m_gameState.m_totalTime;
+    return saved;
+}
+
+void LayerClock::restore(GJBaseGameLayer* layer, Saved const& saved) {
+    if (!layer) return;
+    layer->m_timestamp = saved.timestamp;
+    layer->m_currentStep = saved.currentStep;
+    layer->m_gameState.m_currentProgress = saved.progress;
+    layer->m_gameState.m_levelTime = saved.levelTime;
+    layer->m_gameState.m_totalTime = saved.totalTime;
+}
+
+void LayerClock::observe(GJBaseGameLayer* layer, int step) {
+    if (!layer || step == m_step) return;
+    Saved const now = save(layer);
+    if (m_step >= 0 && step == m_step + 1) {
+        // Smoothed, since the real clock follows the frames.
+        auto blend = [this](double& rate, double delta) {
+            rate = m_rated ? rate * 0.8 + delta * 0.2 : delta;
+        };
+        blend(m_rate.timestamp, now.timestamp - m_at.timestamp);
+        blend(m_rate.currentStep, static_cast<double>(now.currentStep - m_at.currentStep));
+        blend(m_rate.progress, static_cast<double>(now.progress) - static_cast<double>(m_at.progress));
+        blend(m_rate.levelTime, now.levelTime - m_at.levelTime);
+        blend(m_rate.totalTime, now.totalTime - m_at.totalTime);
+        m_rated = true;
+    }
+    m_step = step;
+    m_at = now;
+}
+
+void LayerClock::apply(GJBaseGameLayer* layer, int step) const {
+    if (!layer || m_step < 0 || !m_rated) return;
+    double const d = static_cast<double>(step - m_step);
+    layer->m_timestamp = m_at.timestamp + d * m_rate.timestamp;
+    layer->m_currentStep = m_at.currentStep + static_cast<int>(std::lround(d * m_rate.currentStep));
+    double const progress = static_cast<double>(m_at.progress) + d * m_rate.progress;
+    layer->m_gameState.m_currentProgress = static_cast<unsigned>(std::max(0.0, std::round(progress)));
+    layer->m_gameState.m_levelTime = m_at.levelTime + d * m_rate.levelTime;
+    layer->m_gameState.m_totalTime = m_at.totalTime + d * m_rate.totalTime;
+}
+
+void LayerClock::reset() {
+    // The rates stay: they don't change between attempts.
+    m_step = -1;
+    m_at = Saved{};
+}
+
 FakeWorld& FakeWorld::get() {
     static FakeWorld world;
     return world;
@@ -834,11 +895,15 @@ RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& samp
     ctx.sim = this;
     ctx.died = false;
     ctx.killer = nullptr;
+    // The game's clocks move with the simulated steps and are put back at the end.
+    auto const clocks = LayerClock::save(m_layer);
+    auto const& clock = LayerClock::get();
 
     auto const begin = std::chrono::steady_clock::now();
     float const levelEnd = m_layer->m_levelLength;
 
     while (m_tick < untilTick) {
+        clock.apply(m_layer, this->absoluteStep());
         Mode const mode = modeOf(m_fake);
         bool const want = input(m_tick, mode);
         // The real game may apply a press one tick late; the bot measures which matches.
@@ -866,7 +931,9 @@ RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& samp
         s.mode = mode;
         s.grounded = m_fake->m_isOnGround;
         s.upsideDown = m_fake->m_isUpsideDown;
-        s.ring = m_fake->m_touchedRing || (m_fake->m_touchingRings && m_fake->m_touchingRings->count() > 0);
+        // Orbs the player is inside of after this step's collisions (GD's m_touchedRing can
+        // stay set long after an orb, which made clicks in mid-air look like orb clicks).
+        s.ring = m_fake->m_touchingRings && m_fake->m_touchingRings->count() > 0;
         sample(m_tick, s);
 
         int const tick = m_tick;
@@ -897,6 +964,7 @@ RunResult FakeSim::run(int untilTick, InputFn const& input, SampleFn const& samp
     }
 
     m_secondsRun += std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+    LayerClock::restore(m_layer, clocks);
     ctx = saved;
     result.endTick = m_tick;
     return result;

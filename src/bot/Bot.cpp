@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <utility>
 
 using namespace geode::prelude;
 
@@ -136,6 +137,7 @@ void Bot::resetAttempt() {
     m_seenStep = false;
     m_movementKnown = false;
     ObjectTracker::get().resetAttempt();
+    LayerClock::get().reset();
     m_shadowValid = false;
     m_deathPending = false;
     m_selfTestDone = false;
@@ -145,6 +147,8 @@ void Bot::resetAttempt() {
     m_seenPortal = nullptr;
     m_portalPrevKnown = false;
     m_rescue = false;
+    m_desyncUrgent = false;
+    m_desyncLogs = 0;
     // Each attempt gets its own share of the detailed logs, so the attempt that matters
     // (usually the latest) is in the log too.
     m_surprisesLogged = 0;
@@ -173,6 +177,7 @@ void Bot::onLevelInit(PlayLayer* layer) {
     m_selfTests = 0;
     m_portalLo = -1e9f;
     m_portalHi = 1e9f;
+    m_clockLogged = false;
     m_simTicks = 0;
     m_simSeconds = 0.0;
     TickRecorder::get().reset();
@@ -288,7 +293,13 @@ void Bot::onFrame(PlayLayer* layer) {
     // The real player went through something the plan didn't see coming (a gravity, dual or
     // teleport portal, or a mode change the simulation missed): plan again right away from
     // its new state, free to change even the next tick, and within this frame.
-    bool const urgent = this->movementSurprise(layer, now);
+    bool const surprised = this->movementSurprise(layer, now);
+    bool const desynced = std::exchange(m_desyncUrgent, false);
+    bool const urgent = surprised || desynced;
+    if (!m_clockLogged && now >= 240) {
+        m_clockLogged = true;
+        log::info("Input clock moves {:.3f} ms per physics step", LayerClock::get().timestampStep() * 1000.0);
+    }
     int64_t const baseMs = std::clamp<int64_t>(settings::liveBudget(), 1, 30);
     int64_t const budgetMs = baseMs * (urgent || m_rescue ? 3 : 1);
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(budgetMs);
@@ -840,8 +851,18 @@ void Bot::closeTick(PlayLayer* layer) {
         if (known && (std::abs(expected.x - actual.x) > kDesyncTolerance || std::abs(expected.y - actual.y) > kDesyncTolerance)) {
             m_desyncFlagged = true;
             m_stats.desyncs += 1;
+            if (m_desyncLogs < 6) {
+                m_desyncLogs += 1;
+                log::info(
+                    "Tick {}: real player at ({:.1f},{:.1f}), plan expected ({:.1f},{:.1f}); planning again right away",
+                    tick, actual.x, actual.y, expected.x, expected.y
+                );
+            }
             if (settings::autoCorrect()) {
+                // The plan no longer matches the game: plan again from here at once, free to
+                // change even the next tick (a click may be needed right now).
                 m_forceCheck = true;
+                m_desyncUrgent = true;
             }
         }
     }

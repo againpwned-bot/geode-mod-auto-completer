@@ -94,6 +94,47 @@ private:
     std::vector<TickOp> m_template;
 };
 
+// The game layer's clocks as the real game moves them each physics step. GD 2.2081 stamps
+// every click with the layer's input clock (m_timestamp) and lets a buffered click run
+// out by it, so a simulation, which runs hundreds of steps within one frame, has to move
+// the clocks along with its own steps (and put them back afterwards). Otherwise a click
+// never runs out in a simulation: the bot believed a click on an orb buffered long before
+// would still take the next orb.
+class LayerClock {
+public:
+    static LayerClock& get();
+
+    // The real player is being updated in physics step `step`.
+    void observe(GJBaseGameLayer* layer, int step);
+    // Sets the clocks to where the real game will have them in physics step `step`.
+    void apply(GJBaseGameLayer* layer, int step) const;
+    void reset();
+
+    struct Saved {
+        double timestamp = 0.0;
+        int currentStep = 0;
+        unsigned progress = 0;
+        double levelTime = 0.0;
+        double totalTime = 0.0;
+    };
+    static Saved save(GJBaseGameLayer* layer);
+    static void restore(GJBaseGameLayer* layer, Saved const& saved);
+    // Seconds the input clock moves per physics step (0 until measured).
+    double timestampStep() const { return m_rate.timestamp; }
+
+private:
+    int m_step = -1;
+    Saved m_at;       // the clocks during step m_step
+    struct Rate {
+        double timestamp = 0.0;
+        double currentStep = 0.0;
+        double progress = 0.0;
+        double levelTime = 0.0;
+        double totalTime = 0.0;
+    } m_rate;         // per step
+    bool m_rated = false;
+};
+
 class FakeSim;
 
 // What the hooks need to know while the hidden player is being simulated.
